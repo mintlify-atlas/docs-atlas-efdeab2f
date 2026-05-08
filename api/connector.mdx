@@ -1,0 +1,196 @@
+---
+title: "buildConnector: Custom TLS and Socket Connectors"
+description: "Use undici buildConnector to create custom socket connectors with TLS options, certificate pinning, and socket inspection before HTTP requests are dispatched."
+---
+
+undici creates its underlying sockets through a connector function. In most cases this happens automatically, but `buildConnector` lets you intercept the socket creation process — useful for custom TLS verification, certificate pinning, Unix domain socket connections, or injecting custom socket logic.
+
+## `buildConnector(options)`
+
+Creates a connector function with the given TLS and socket options.
+
+```javascript
+import { buildConnector } from 'undici'
+
+const connector = buildConnector(options)
+```
+
+### BuildOptions
+
+All [Node.js TLS options](https://nodejs.org/api/tls.html#tls_tls_connect_options_callback) are supported, plus:
+
+<ParamField path="socketPath" type="string | null">
+  An IPC endpoint — Unix domain socket path or Windows named pipe. Default: `null`.
+</ParamField>
+
+<ParamField path="maxCachedSessions" type="number | null">
+  Maximum number of TLS sessions to cache for reuse. Set to `0` to disable TLS session caching. Default: `100`.
+</ParamField>
+
+<ParamField path="timeout" type="number | null">
+  Connection timeout in milliseconds. Default: `10000` (10 seconds).
+</ParamField>
+
+<ParamField path="servername" type="string | null">
+  Override the TLS SNI server name.
+</ParamField>
+
+<ParamField path="rejectUnauthorized" type="boolean">
+  If `false`, disables TLS certificate validation. Useful for self-signed certificates in development. Default: `true`.
+</ParamField>
+
+### Connector function parameters
+
+The returned connector function accepts:
+
+<ParamField path="hostname" type="string" required>
+  The target hostname.
+</ParamField>
+
+<ParamField path="host" type="string">
+  The target host (may differ from hostname).
+</ParamField>
+
+<ParamField path="protocol" type="string" required>
+  The protocol (`http:` or `https:`).
+</ParamField>
+
+<ParamField path="port" type="string" required>
+  The target port.
+</ParamField>
+
+<ParamField path="servername" type="string">
+  Override the TLS SNI server name for this connection.
+</ParamField>
+
+<ParamField path="localAddress" type="string | null">
+  The local network address the socket should bind to.
+</ParamField>
+
+<ParamField path="httpSocket" type="Socket">
+  Establish a secure TLS connection over an existing socket (TLS upgrade only).
+</ParamField>
+
+## Basic example
+
+Use `buildConnector` to add custom post-connection logic:
+
+```javascript Basic custom connector
+import { Client, buildConnector } from 'undici'
+
+const connector = buildConnector({ rejectUnauthorized: false })
+
+const client = new Client('https://localhost:3000', {
+  connect(opts, cb) {
+    connector(opts, (err, socket) => {
+      if (err) {
+        cb(err)
+      } else if (!isValidSocket(socket)) {
+        socket.destroy()
+        cb(new Error('Socket validation failed'))
+      } else {
+        cb(null, socket)
+      }
+    })
+  }
+})
+```
+
+## Certificate fingerprint pinning
+
+Verify the server's certificate fingerprint to prevent MITM attacks:
+
+```javascript Certificate fingerprint validation
+import { Client, buildConnector } from 'undici'
+
+const EXPECTED_FINGERPRINT = 'AA:BB:CC:DD:EE:FF:...' // SHA-256 fingerprint
+const connector = buildConnector({ rejectUnauthorized: false })
+
+const client = new Client('https://api.example.com', {
+  connect(opts, cb) {
+    connector(opts, (err, socket) => {
+      if (err) {
+        cb(err)
+        return
+      }
+
+      const cert = getIssuerCertificate(socket)
+      if (!cert || cert.fingerprint256 !== EXPECTED_FINGERPRINT) {
+        socket.destroy()
+        cb(new Error('Certificate fingerprint does not match'))
+        return
+      }
+
+      cb(null, socket)
+    })
+  }
+})
+
+// Traverse the certificate chain to find the issuer certificate
+function getIssuerCertificate(socket) {
+  let cert = socket.getPeerCertificate(true)
+  while (cert && Object.keys(cert).length > 0) {
+    if (cert.issuerCertificate == null) return null
+    // Root certificate (possibly self-signed)
+    if (cert.fingerprint256 === cert.issuerCertificate.fingerprint256) break
+    cert = cert.issuerCertificate
+  }
+  return cert
+}
+
+const { body } = await client.request({ path: '/', method: 'GET' })
+await body.dump()
+client.close()
+```
+
+## Using the connect option on Agent
+
+Pass a `connect` option (either a `ConnectOptions` object or a custom connector function) directly to `Client`, `Pool`, or `Agent`:
+
+```javascript Custom TLS on Agent
+import { Agent, setGlobalDispatcher, buildConnector } from 'undici'
+
+const connector = buildConnector({
+  rejectUnauthorized: true,
+  ca: fs.readFileSync('./ca.crt'),
+  maxCachedSessions: 50
+})
+
+setGlobalDispatcher(new Agent({
+  connect: connector
+}))
+```
+
+## Unix domain sockets
+
+Connect to a server over a Unix socket instead of TCP:
+
+```javascript Unix socket connection
+import { Client, buildConnector } from 'undici'
+
+const connector = buildConnector({ socketPath: '/var/run/myapp.sock' })
+
+const client = new Client('http://localhost', {
+  connect: connector
+})
+
+const { body } = await client.request({ path: '/health', method: 'GET' })
+console.log(await body.text())
+```
+
+<Tip>
+  For most use cases involving client certificates or custom TLS, you can pass TLS options directly to the `connect` option of `Client`, `Pool`, or `Agent` without needing `buildConnector`:
+
+  ```javascript
+  import { Client } from 'undici'
+  import fs from 'node:fs'
+
+  const client = new Client('https://api.example.com', {
+    connect: {
+      cert: fs.readFileSync('./client.crt'),
+      key: fs.readFileSync('./client.key'),
+      ca: fs.readFileSync('./ca.crt')
+    }
+  })
+  ```
+</Tip>

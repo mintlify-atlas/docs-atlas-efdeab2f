@@ -1,0 +1,319 @@
+---
+title: "MockPool: Multi-Connection HTTP Mocking in undici"
+description: "Mock HTTP requests to a single origin with multiple connections using undici MockPool. Full intercept API with path, method, body, and header matching."
+---
+
+`MockPool` extends undici's `Pool` class and is the default mock dispatcher returned by `mockAgent.get(origin)`. It supports multiple concurrent connections to a single origin and provides the full intercept API for matching and replying to HTTP requests. All interceptors you register are consumed in the order they were added — each one fires once by default, unless you call `.persist()` or `.times(n)` on the returned scope.
+
+## Constructor
+
+<Warning>
+  `MockPool` requires an `agent` option pointing to a `MockAgent`. Omitting it throws `InvalidArgumentError`. In practice, use `mockAgent.get()` rather than constructing `MockPool` directly.
+</Warning>
+
+<ParamField body="origin" type="string" required>
+  The origin to mock. Must include the protocol, hostname, and optionally the port — for example `'http://localhost:3000'`. No path component.
+</ParamField>
+
+<ParamField body="options" type="object" required>
+  Extends `PoolOptions`.
+
+  <Expandable title="MockPoolOptions">
+    <ParamField body="agent" type="MockAgent" required>
+      The `MockAgent` this pool is associated with. Required — throws `InvalidArgumentError` if missing or invalid.
+    </ParamField>
+    <ParamField body="ignoreTrailingSlash" type="boolean" default="false">
+      When `true`, trailing slashes in interceptor `path` values are ignored during matching.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Getting a MockPool from MockAgent
+
+```javascript title="Obtaining a MockPool via MockAgent"
+import { MockAgent } from 'undici'
+
+const mockAgent = new MockAgent()
+// connections defaults to more than 1 → returns a MockPool
+const mockPool = mockAgent.get('http://localhost:3000')
+```
+
+## `mockPool.intercept(options)`
+
+Registers an interceptor for a specific request pattern. All defined options must match for an interceptor to fire. Returns a `MockInterceptor` that you chain to define the response.
+
+<ParamField body="options" type="object" required>
+  <Expandable title="MockPoolInterceptOptions">
+    <ParamField body="path" type="string | RegExp | (path: string) => boolean" required>
+      Matches the request path. When a `string`, query parameters can be supplied separately via the `query` option. When a `RegExp` or function, it receives the full path with all query parameters sorted alphabetically.
+    </ParamField>
+    <ParamField body="method" type="string | RegExp | (method: string) => boolean" default="'GET'">
+      Matches the HTTP method.
+    </ParamField>
+    <ParamField body="body" type="string | RegExp | (body: string) => boolean">
+      Matches the request body string.
+    </ParamField>
+    <ParamField body="headers" type="Record<string, string | RegExp | (value: string) => boolean>">
+      Matches specific request headers. All defined keys must match; extra headers in the request are ignored.
+    </ParamField>
+    <ParamField body="query" type="Record<string, any> | null">
+      Matches query string parameters. Applies only when `path` is a `string`.
+    </ParamField>
+    <ParamField body="ignoreTrailingSlash" type="boolean" default="false">
+      Ignore trailing slashes when matching `path`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="returns" type="MockInterceptor">
+  A `MockInterceptor` instance for defining the response.
+</ResponseField>
+
+## MockInterceptor — defining responses
+
+### `.reply(statusCode, body, options?)`
+
+<ParamField body="statusCode" type="number" required>
+  HTTP status code of the mocked response.
+</ParamField>
+<ParamField body="body" type="string | Buffer | object | (opts: RequestInfo) => body">
+  Response body. Objects are JSON-serialised; strings and buffers are sent as-is. A callback receives `{ method, url, body, headers, origin }` and must return the body value.
+</ParamField>
+<ParamField body="options" type="object">
+  <Expandable title="MockResponseOptions">
+    <ParamField body="headers" type="Record<string, string>">
+      Response headers.
+    </ParamField>
+    <ParamField body="trailers" type="Record<string, string>">
+      Response trailers.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### `.reply(callback)`
+
+Alternative signature — a single callback that returns the full options object `{ statusCode, data, headers?, trailers? }`.
+
+### `.replyWithError(error)`
+
+Causes the matched request to throw the given `Error`.
+
+### `.defaultReplyHeaders(headers)`
+
+Merges these headers into every subsequent `reply()` on this interceptor. Specific `reply()` headers take precedence.
+
+### `.defaultReplyTrailers(trailers)`
+
+Merges these trailers into every subsequent `reply()`.
+
+### `.replyContentLength()`
+
+Automatically adds a `content-length` header calculated from the reply body.
+
+## MockScope — controlling repeat behaviour
+
+`reply()` and `replyWithError()` return a `MockScope`. Chain these methods to control how many times the interceptor fires:
+
+<ResponseField name="persist()" type="MockScope">
+  The interceptor matches indefinitely. Without this, interceptors are single-use.
+</ResponseField>
+<ResponseField name="times(n)" type="MockScope">
+  The interceptor matches exactly `n` times.
+</ResponseField>
+<ResponseField name="delay(ms)" type="MockScope">
+  Delays the response by `ms` milliseconds before replying.
+</ResponseField>
+
+## Matcher reference
+
+Every `path`, `method`, `body`, and header value supports three matcher types:
+
+| Matcher | How it works |
+|---|---|
+| `string` | Exact string equality |
+| `RegExp` | `regex.test(value)` must be `true` |
+| `Function` | Function must return `true` |
+
+## Examples
+
+### Basic mocked request
+
+```javascript title="Simple GET intercept"
+import { MockAgent, setGlobalDispatcher, request } from 'undici'
+
+const mockAgent = new MockAgent()
+setGlobalDispatcher(mockAgent)
+
+const mockPool = mockAgent.get('http://localhost:3000')
+mockPool.intercept({ path: '/foo' }).reply(200, 'foo')
+
+const { statusCode, body } = await request('http://localhost:3000/foo')
+
+console.log(statusCode) // 200
+for await (const data of body) {
+  console.log(data.toString('utf8')) // foo
+}
+```
+
+### POST with body, headers, and trailers
+
+```javascript title="POST with full request and response matching"
+import { MockAgent, setGlobalDispatcher, request } from 'undici'
+
+const mockAgent = new MockAgent()
+setGlobalDispatcher(mockAgent)
+
+const mockPool = mockAgent.get('http://localhost:3000')
+
+mockPool.intercept({
+  path: '/foo?hello=there&see=ya',
+  method: 'POST',
+  body: 'form1=data1&form2=data2',
+  headers: {
+    'User-Agent': 'undici',
+    Host: 'example.com'
+  }
+}).reply(200, { foo: 'bar' }, {
+  headers: { 'content-type': 'application/json' },
+  trailers: { 'Content-MD5': 'test' }
+})
+
+const { statusCode, headers, trailers, body } = await request(
+  'http://localhost:3000/foo?hello=there&see=ya',
+  {
+    method: 'POST',
+    body: 'form1=data1&form2=data2',
+    headers: {
+      'User-Agent': 'undici',
+      Host: 'example.com'
+    }
+  }
+)
+
+console.log(statusCode) // 200
+console.log(headers['content-type']) // application/json
+for await (const data of body) {
+  console.log(data.toString('utf8')) // {"foo":"bar"}
+}
+console.log(trailers['content-md5']) // test
+```
+
+### Dynamic reply with a callback
+
+```javascript title="Echo reply using a data callback"
+mockPool.intercept({
+  path: '/echo',
+  method: 'GET',
+  headers: { 'User-Agent': 'undici' }
+}).reply(200, ({ headers }) => ({ message: headers.get('message') }))
+```
+
+### Reply with an error
+
+```javascript title="Simulating a connection error"
+import { MockAgent, setGlobalDispatcher, request } from 'undici'
+
+const mockAgent = new MockAgent()
+setGlobalDispatcher(mockAgent)
+
+const mockPool = mockAgent.get('http://localhost:3000')
+mockPool.intercept({ path: '/foo', method: 'GET' }).replyWithError(new Error('kaboom'))
+
+try {
+  await request('http://localhost:3000/foo')
+} catch (error) {
+  console.error(error.cause) // Error: kaboom
+}
+```
+
+### Default reply headers
+
+```javascript title="Setting default headers on an interceptor"
+mockPool.intercept({ path: '/foo' })
+  .defaultReplyHeaders({ 'x-powered-by': 'undici' })
+  .reply(200, 'foo')
+```
+
+### Automatic content-length
+
+```javascript title="Auto-calculated content-length"
+mockPool.intercept({ path: '/foo' })
+  .replyContentLength()
+  .reply(200, { foo: 'bar' })
+// Response includes: content-length: 13
+```
+
+### Persistent interceptors
+
+```javascript title="Interceptor that matches every time"
+mockPool.intercept({ path: '/foo' }).reply(200, 'foo').persist()
+
+await request('http://localhost:3000/foo') // matches
+await request('http://localhost:3000/foo') // matches again
+```
+
+### Fixed-count interceptors
+
+```javascript title="Interceptor that matches twice"
+mockPool.intercept({ path: '/foo' }).reply(200, 'foo').times(2)
+
+await request('http://localhost:3000/foo') // matches
+await request('http://localhost:3000/foo') // matches
+await request('http://localhost:3000/foo') // does NOT match — falls through
+```
+
+### Function path matcher
+
+```javascript title="Custom path matching function"
+import querystring from 'node:querystring'
+
+const matchPath = (requestPath) => {
+  const [pathname, search] = requestPath.split('?')
+  const query = querystring.parse(search)
+  return pathname.startsWith('/foo') && query.foo === 'bar'
+}
+
+mockPool.intercept({ path: matchPath, method: 'GET' }).reply(200, 'matched')
+
+await request('http://localhost:3000/foo?foo=bar') // matches
+```
+
+## Additional instance methods
+
+### `mockPool.cleanMocks()`
+
+Removes all registered interceptors from the pool.
+
+```javascript title="Clearing all interceptors"
+mockPool.cleanMocks()
+```
+
+### `mockPool.close()`
+
+Closes the pool and de-registers it from its parent `MockAgent`.
+
+```javascript title="Closing a MockPool"
+await mockPool.close()
+```
+
+### `mockPool.request(options)`
+
+Dispatches a request directly through this mock pool, bypassing the global dispatcher.
+
+```javascript title="Direct request through MockPool"
+const { statusCode, body } = await mockPool.request({
+  origin: 'http://localhost:3000',
+  path: '/foo',
+  method: 'GET'
+})
+```
+
+## When to use MockPool vs MockClient vs MockAgent
+
+| Scenario | Recommended choice |
+|---|---|
+| Multiple concurrent connections to one origin | `MockPool` (default from `mockAgent.get()`) |
+| Single-connection semantics | `MockClient` via `MockAgent({ connections: 1 })` |
+| Multiple origins in one test | `MockAgent` + `mockAgent.get()` per origin |
+
+`MockPool` is the default because most production code uses a `Pool` or the default `Agent`. Prefer `MockClient` only when your code explicitly targets a `Client`.

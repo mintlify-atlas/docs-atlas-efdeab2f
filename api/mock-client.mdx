@@ -1,0 +1,183 @@
+---
+title: "MockClient: Single-Origin HTTP Mocking in undici"
+description: "Mock a single HTTP origin with one connection using MockClient. Includes intercept API, constructor options, and when to choose MockClient over MockPool."
+---
+
+`MockClient` extends undici's `Client` class and gives you the same intercept API as `MockPool` but constrained to a single persistent connection. You rarely instantiate `MockClient` directly — the standard approach is to call `mockAgent.get(origin)` on a `MockAgent` configured with `connections: 1`, which returns a `MockClient` automatically. Direct instantiation is available for advanced cases where you want to own the lifecycle of a single-origin mock entirely.
+
+## Constructor
+
+<Warning>
+  `MockClient` requires an `agent` option that is a `MockAgent` instance. Omitting it throws an `InvalidArgumentError`.
+</Warning>
+
+<ParamField body="origin" type="string" required>
+  The origin to mock. Must include the protocol, hostname, and optionally the port — for example `'http://localhost:3000'`. No path component.
+</ParamField>
+
+<ParamField body="options" type="object" required>
+  Extends `ClientOptions`.
+
+  <Expandable title="MockClientOptions">
+    <ParamField body="agent" type="MockAgent" required>
+      The `MockAgent` this client is associated with. Required — throws `InvalidArgumentError` if missing or invalid.
+    </ParamField>
+    <ParamField body="ignoreTrailingSlash" type="boolean" default="false">
+      When `true`, trailing slashes in interceptor paths are ignored during matching.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Getting a MockClient from MockAgent
+
+The recommended way to obtain a `MockClient` is through `MockAgent`:
+
+```javascript title="Obtaining a MockClient via MockAgent"
+import { MockAgent } from 'undici'
+
+// connections: 1 tells MockAgent to create MockClient instances instead of MockPool
+const mockAgent = new MockAgent({ connections: 1 })
+
+const mockClient = mockAgent.get('http://localhost:3000')
+// mockClient is a MockClient instance
+```
+
+## `mockClient.intercept(options)`
+
+Registers an interceptor on this client. The options and return value are identical to `MockPool.intercept()`.
+
+<ParamField body="options" type="object" required>
+  <Expandable title="MockPoolInterceptOptions">
+    <ParamField body="path" type="string | RegExp | (path: string) => boolean" required>
+      Matches the request path. When a `string` is provided, query parameters can be supplied separately via `query`. `RegExp` and function matchers receive the full path with query string.
+    </ParamField>
+    <ParamField body="method" type="string | RegExp | (method: string) => boolean" default="'GET'">
+      Matches the HTTP method.
+    </ParamField>
+    <ParamField body="body" type="string | RegExp | (body: string) => boolean">
+      Matches the request body.
+    </ParamField>
+    <ParamField body="headers" type="Record<string, string | RegExp | (value: string) => boolean>">
+      Matches specific request headers. All defined keys must match; extra headers are ignored.
+    </ParamField>
+    <ParamField body="query" type="Record<string, any> | null">
+      Matches query parameters. Only applies when `path` is a `string`.
+    </ParamField>
+    <ParamField body="ignoreTrailingSlash" type="boolean" default="false">
+      Ignore trailing slashes when matching `path`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="returns" type="MockInterceptor">
+  Chain `.reply()`, `.replyWithError()`, `.defaultReplyHeaders()`, `.defaultReplyTrailers()`, `.replyContentLength()` to define the response. Then chain `.persist()`, `.times(n)`, or `.delay(ms)` on the returned `MockScope` to control repeat behaviour.
+</ResponseField>
+
+```javascript title="Intercepting a GET request on MockClient"
+import { MockAgent, request } from 'undici'
+
+const mockAgent = new MockAgent({ connections: 1 })
+const mockClient = mockAgent.get('http://localhost:3000')
+
+mockClient.intercept({ path: '/foo', method: 'GET' }).reply(200, 'foo')
+
+const { statusCode, body } = await mockClient.request({
+  origin: 'http://localhost:3000',
+  path: '/foo',
+  method: 'GET'
+})
+
+console.log(statusCode) // 200
+
+for await (const chunk of body) {
+  console.log(chunk.toString('utf8')) // foo
+}
+```
+
+## Additional instance methods
+
+### `mockClient.cleanMocks()`
+
+Removes all registered interceptors from the client.
+
+```javascript title="Clearing all interceptors"
+mockClient.cleanMocks()
+```
+
+### `mockClient.close()`
+
+Closes the client and de-registers it from its parent `MockAgent`.
+
+```javascript title="Closing a MockClient"
+await mockClient.close()
+```
+
+### `mockClient.request(options)`
+
+Same as `Dispatcher.request()`. You can dispatch requests directly through the mock client without going through the global dispatcher.
+
+```javascript title="Direct request through MockClient"
+import { MockAgent } from 'undici'
+
+const mockAgent = new MockAgent({ connections: 1 })
+const mockClient = mockAgent.get('http://localhost:3000')
+
+mockClient.intercept({ path: '/health' }).reply(200, { ok: true })
+
+const { statusCode, body } = await mockClient.request({
+  origin: 'http://localhost:3000',
+  path: '/health',
+  method: 'GET'
+})
+
+console.log(await body.json()) // { ok: true }
+```
+
+## When to use MockClient vs MockPool vs MockAgent
+
+<Note>
+  In most tests you do not need to choose — use `MockAgent` and let it create the right type for you.
+</Note>
+
+| Scenario | Recommended class |
+|---|---|
+| General-purpose mocking across multiple origins | `MockAgent` + `mockAgent.get()` (returns `MockPool` by default) |
+| Simulating a single-connection origin (e.g. HTTP/1.1 keep-alive server) | `MockAgent({ connections: 1 })` → `MockClient` |
+| Owning mock lifecycle for one origin independently | `MockClient` directly (advanced) |
+| Multiple concurrent connections to one origin | `MockPool` (via `MockAgent`) |
+
+`MockClient` is backed by a single undici `Client`, meaning requests are serialised through one connection. `MockPool` allows multiple concurrent connections to the same origin. Choose `MockClient` when your production code targets a `Client` directly or when you need to test single-connection semantics.
+
+## Complete example
+
+```javascript title="MockClient in a node:test test"
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { MockAgent, setGlobalDispatcher, getGlobalDispatcher, request } from 'undici'
+
+test('single-connection mock with MockClient', async (t) => {
+  const original = getGlobalDispatcher()
+
+  // connections: 1 → MockAgent.get() returns a MockClient
+  const mockAgent = new MockAgent({ connections: 1 })
+  mockAgent.disableNetConnect()
+  setGlobalDispatcher(mockAgent)
+
+  t.after(async () => {
+    await mockAgent.close()
+    setGlobalDispatcher(original)
+  })
+
+  const mockClient = mockAgent.get('http://localhost:3000')
+
+  mockClient
+    .intercept({ path: '/ping', method: 'GET' })
+    .reply(200, { pong: true }, { headers: { 'content-type': 'application/json' } })
+
+  const { statusCode, body } = await request('http://localhost:3000/ping')
+
+  assert.equal(statusCode, 200)
+  const json = await body.json()
+  assert.deepEqual(json, { pong: true })
+})
+```

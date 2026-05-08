@@ -1,0 +1,276 @@
+---
+title: "RetryHandler: Request-Level Retry Logic in undici"
+description: "Reference for undici's RetryHandler class — configure per-request retry with custom callbacks, exponential backoff, and fine-grained error code control."
+---
+
+`RetryHandler` is a handler class (not a dispatcher) that wraps another handler and re-dispatches a request on failure. Unlike the `interceptors.retry` interceptor, which applies retry logic globally to every request on a dispatcher, `RetryHandler` gives you request-level control: you construct it explicitly for a single `dispatch()` call, making it ideal when different endpoints within the same application require different retry policies.
+
+## Constructor
+
+```ts
+new RetryHandler(options, retryHandlers)
+```
+
+### `options`
+
+`options` is an intersection of `Dispatcher.DispatchOptions` and `RetryOptions`. All standard dispatch options (`path`, `method`, `headers`, `body`, etc.) are passed through, and the retry configuration lives in the nested `retryOptions` key.
+
+<ParamField body="retryOptions" type="RetryOptions" default="{}">
+  Retry-specific configuration. All fields are optional and fall back to their documented defaults.
+
+  <Expandable title="RetryOptions">
+    <ParamField body="maxRetries" type="number" default="5">
+      Maximum number of retry attempts. After this many attempts, the error is propagated.
+    </ParamField>
+
+    <ParamField body="minTimeout" type="number" default="500">
+      Minimum wait in milliseconds before the first retry.
+    </ParamField>
+
+    <ParamField body="maxTimeout" type="number" default="30000">
+      Maximum wait in milliseconds between retries. The computed exponential delay is capped at this value.
+    </ParamField>
+
+    <ParamField body="timeoutFactor" type="number" default="2">
+      Multiplier for the exponential backoff formula: `delay = min(minTimeout * timeoutFactor^(attempt-1), maxTimeout)`.
+    </ParamField>
+
+    <ParamField body="retryAfter" type="boolean" default="true">
+      When `true`, the `Retry-After` response header is honoured. Both relative seconds and absolute date strings are supported. The value is still capped at `maxTimeout`.
+    </ParamField>
+
+    <ParamField body="statusCodes" type="number[]" default="[500, 502, 503, 504, 429]">
+      HTTP status codes that trigger a retry. Responses with status codes absent from this list are forwarded directly to the wrapped handler.
+    </ParamField>
+
+    <ParamField body="methods" type="string[]" default="['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE', 'TRACE']">
+      HTTP methods for which retries are permitted. Methods not in this list cause the error to propagate immediately.
+    </ParamField>
+
+    <ParamField body="errorCodes" type="string[]" default="['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'ENETDOWN', 'ENETUNREACH', 'EHOSTDOWN', 'EHOSTUNREACH', 'EPIPE', 'UND_ERR_SOCKET']">
+      Node.js error codes and undici error codes that trigger a retry. Errors with codes not in this list propagate immediately.
+    </ParamField>
+
+    <ParamField body="throwOnError" type="boolean" default="true">
+      When `true`, throws after all retries are exhausted. Set to `false` to receive the error response body without an exception — useful when the server's error payload contains information your code needs.
+    </ParamField>
+
+    <ParamField body="retry" type="(err: Error, context: RetryContext, callback: (err?: Error | null) => void) => void" default="undefined">
+      Custom retry decision function. When provided, it completely replaces the default exponential backoff logic. Call `callback(null)` to schedule a retry or `callback(err)` to abort retrying. See [Custom retry callback](#custom-retry-callback) below.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### `retryHandlers`
+
+The second argument is an object with two required fields:
+
+<ParamField body="dispatch" type="function" required>
+  The dispatch function to invoke on each retry attempt — typically `client.dispatch.bind(client)`. This is called again with the same options (plus any `Range` headers if partial content was received) on each retry.
+</ParamField>
+
+<ParamField body="handler" type="Dispatcher.DispatchHandler" required>
+  The downstream handler that receives events once the request ultimately succeeds or retries are exhausted. Must implement the standard dispatch handler interface (`onRequestStart`, `onResponseStart`, `onResponseData`, `onResponseEnd`, `onResponseError`).
+</ParamField>
+
+## Custom retry callback
+
+When you provide a `retry` function in `retryOptions`, it is called after every failed attempt with three arguments:
+
+```ts
+retry(
+  err: Error,                          // The error that caused the failure
+  context: RetryContext,               // Current retry state and options
+  callback: (err?: Error | null) => void  // Signal retry or abort
+): void
+```
+
+### `RetryContext`
+
+<ParamField body="state" type="RetryState">
+  Current retry state. The `counter` property reflects the number of attempts made so far and can be read (but should not be mutated externally).
+
+  <Expandable title="RetryState">
+    <ParamField body="counter" type="number">
+      Number of retry attempts that have been made.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="opts" type="Dispatcher.DispatchOptions & RetryOptions">
+  The full merged options passed to the `RetryHandler` constructor. Useful for reading the current method, headers, or retry configuration inside the callback.
+</ParamField>
+
+Call `callback(null)` to proceed with the next retry (after whatever delay your logic imposes), or `callback(err)` to stop retrying and propagate `err` to the handler's `onResponseError`.
+
+## How `RetryHandler` differs from `interceptors.retry`
+
+| | `RetryHandler` | `interceptors.retry` |
+|--|----------------|----------------------|
+| Scope | Single `dispatch()` call | Every request on the dispatcher |
+| Configuration | Per-call in the constructor | Per-dispatcher in `.compose()` |
+| Use case | Different retry policies per endpoint | Uniform retry policy across all requests |
+| Access to response body on failure | Yes (with `throwOnError: false`) | Yes |
+
+`interceptors.retry` is implemented by creating a `RetryHandler` internally on every request, merging global interceptor options with per-request `retryOptions`.
+
+## Partial body resume
+
+`RetryHandler` is aware of partial responses. When a response with a known `Content-Length` or `Content-Range` is interrupted mid-stream, subsequent retry attempts add a `Range: bytes=<offset>-` header to resume from where the previous attempt left off. An `If-Match` header with the original `ETag` is included when available to detect resource changes between attempts.
+
+<Warning>
+  Requests with stateful bodies — `Readable` streams or `AsyncIterable` instances that have already started emitting data — cannot be replayed. `RetryHandler` detects this and aborts with `UND_ERR_REQ_RETRY` rather than silently sending a truncated or incorrect body.
+</Warning>
+
+## Examples
+
+<Tabs>
+  <Tab title="Basic usage">
+    ```js title="RetryHandler with default options"
+    import { Client, RetryHandler } from 'undici'
+
+    const client = new Client('https://api.example.com')
+
+    const chunks = []
+    const handler = new RetryHandler(
+      {
+        origin: 'https://api.example.com',
+        path: '/data',
+        method: 'GET',
+        retryOptions: {
+          maxRetries: 5,
+          minTimeout: 500,
+          statusCodes: [429, 500, 502, 503, 504]
+        }
+      },
+      {
+        dispatch: client.dispatch.bind(client),
+        handler: {
+          onRequestStart (_controller, _context) {},
+          onBodySent (_chunk) {},
+          onResponseStart (_controller, statusCode, headers) {
+            console.log('Response status:', statusCode)
+          },
+          onResponseData (_controller, chunk) {
+            chunks.push(chunk)
+          },
+          onResponseEnd (_controller, _trailers) {
+            console.log('Body:', Buffer.concat(chunks).toString())
+          },
+          onResponseError (_controller, err) {
+            console.error('Final error after retries:', err)
+          }
+        }
+      }
+    )
+
+    client.dispatch(
+      { origin: 'https://api.example.com', path: '/data', method: 'GET' },
+      handler
+    )
+    ```
+  </Tab>
+  <Tab title="Custom retry function">
+    ```js title="Custom retry callback — skip retrying on specific errors"
+    import { Client, RetryHandler } from 'undici'
+
+    const client = new Client('https://api.example.com')
+    let retryCount = 0
+
+    const handler = new RetryHandler(
+      {
+        origin: 'https://api.example.com',
+        path: '/submit',
+        method: 'PUT',
+        retryOptions: {
+          retry (err, { state }, callback) {
+            retryCount++
+
+            // Never retry if the connection was deliberately destroyed
+            if (err.code === 'UND_ERR_DESTROYED') {
+              callback(err)
+              return
+            }
+
+            // Don't retry Partial Content (206) errors
+            if (err.statusCode === 206) {
+              callback(err)
+              return
+            }
+
+            // Custom fixed-delay retry
+            setTimeout(() => callback(null), 1_000)
+          }
+        }
+      },
+      {
+        dispatch: client.dispatch.bind(client),
+        handler: {
+          onRequestStart () {},
+          onBodySent () {},
+          onResponseStart (_controller, statusCode) {
+            console.log('status', statusCode)
+          },
+          onResponseData (_controller, _chunk) {},
+          onResponseEnd () {
+            console.log(`Succeeded after ${retryCount} retries`)
+          },
+          onResponseError (_controller, err) {
+            console.error('Giving up:', err.message)
+          }
+        }
+      }
+    )
+
+    client.dispatch(
+      { origin: 'https://api.example.com', path: '/submit', method: 'PUT' },
+      handler
+    )
+    ```
+  </Tab>
+  <Tab title="throwOnError: false">
+    ```js title="Receive error body without throwing"
+    import { Client, RetryHandler } from 'undici'
+
+    const client = new Client('https://api.example.com')
+    const chunks = []
+
+    const handler = new RetryHandler(
+      {
+        origin: 'https://api.example.com',
+        path: '/resource',
+        method: 'GET',
+        retryOptions: {
+          maxRetries: 2,
+          throwOnError: false // surface the error response body
+        }
+      },
+      {
+        dispatch: client.dispatch.bind(client),
+        handler: {
+          onRequestStart () {},
+          onBodySent () {},
+          onResponseStart (_controller, statusCode, headers) {
+            console.log('Status:', statusCode)
+          },
+          onResponseData (_controller, chunk) {
+            chunks.push(chunk)
+          },
+          onResponseEnd (_controller) {
+            // Available even on 5xx after retries are exhausted
+            console.log('Error body:', Buffer.concat(chunks).toString())
+          },
+          onResponseError (_controller, err) {
+            console.error(err)
+          }
+        }
+      }
+    )
+
+    client.dispatch(
+      { origin: 'https://api.example.com', path: '/resource', method: 'GET' },
+      handler
+    )
+    ```
+  </Tab>
+</Tabs>

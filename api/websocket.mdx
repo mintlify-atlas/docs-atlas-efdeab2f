@@ -1,0 +1,243 @@
+---
+title: "WebSocket and WebSocketStream API"
+description: "undici provides a WHATWG-compliant WebSocket client for Node.js with support for custom dispatchers, proxies, binary data, and HTTP/2 connections."
+---
+
+undici exports a `WebSocket` class that implements the [WHATWG WebSocket API](https://websockets.spec.whatwg.org/), enabling bidirectional communication from Node.js without browser restrictions. It also exports an experimental `WebSocketStream` for stream-based WebSocket access and a `ping()` utility for keepalive frames.
+
+## WebSocket
+
+### Constructor
+
+```javascript
+new WebSocket(url[, protocol])
+```
+
+<ParamField path="url" type="string | URL" required>
+  The WebSocket server URL. Must use `ws://` or `wss://` scheme.
+</ParamField>
+
+<ParamField path="protocol" type="string | string[] | WebSocketInit">
+  Optional. A subprotocol string, array of subprotocols, or a `WebSocketInit` object for advanced configuration.
+</ParamField>
+
+#### WebSocketInit options
+
+When passing an object as the second argument:
+
+<ParamField path="protocols" type="string | string[]">
+  Subprotocol(s) to request the server use.
+</ParamField>
+
+<ParamField path="dispatcher" type="Dispatcher">
+  A custom dispatcher (e.g. `ProxyAgent`, `Agent`) to use for the WebSocket handshake connection.
+</ParamField>
+
+<ParamField path="headers" type="HeadersInit">
+  Custom headers to include in the WebSocket handshake HTTP request.
+</ParamField>
+
+### Basic usage
+
+```javascript Basic WebSocket connection
+import { WebSocket } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events')
+
+ws.onopen = () => {
+  console.log('Connected')
+  ws.send('Hello, server!')
+}
+
+ws.onmessage = (event) => {
+  console.log('Received:', event.data)
+}
+
+ws.onerror = (event) => {
+  console.error('WebSocket error:', event)
+}
+
+ws.onclose = (event) => {
+  console.log('Closed:', event.code, event.reason)
+}
+```
+
+### Using a custom dispatcher
+
+Pass a `WebSocketInit` object to use a custom dispatcher such as `ProxyAgent`:
+
+```javascript WebSocket through a proxy
+import { WebSocket, ProxyAgent } from 'undici'
+
+const proxyAgent = new ProxyAgent('http://my.proxy.server:8080')
+
+const ws = new WebSocket('wss://echo.websocket.events', {
+  dispatcher: proxyAgent,
+  protocols: ['echo', 'chat'],
+  headers: { 'x-custom-header': 'value' }
+})
+```
+
+<Note>
+  The `WebSocketInit` object form is a Node.js extension — it will not work in browsers or other platforms that don't allow passing an object as the second argument.
+</Note>
+
+### Subprotocols (standard form)
+
+If you don't need a custom dispatcher, use the standard string/array form:
+
+```javascript
+import { WebSocket } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events', ['echo', 'chat'])
+```
+
+### WebSocket over HTTP/2
+
+<Warning>
+  WebSocket over HTTP/2 is experimental and likely to change in a future version.
+</Warning>
+
+```javascript WebSocket over HTTP/2
+import { Agent, WebSocket } from 'undici'
+
+const agent = new Agent({ allowH2: true })
+
+const ws = new WebSocket('wss://echo.websocket.events', {
+  dispatcher: agent,
+  protocols: ['echo', 'chat']
+})
+```
+
+### Sending data
+
+```javascript Sending text and binary
+import { WebSocket } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events')
+
+ws.onopen = () => {
+  // Send text
+  ws.send('Hello, world!')
+
+  // Send binary (ArrayBuffer)
+  const buffer = new ArrayBuffer(8)
+  ws.send(buffer)
+
+  // Send binary (Uint8Array)
+  const bytes = new Uint8Array([1, 2, 3, 4])
+  ws.send(bytes)
+}
+```
+
+### Receiving binary data
+
+Set `binaryType` to control how binary messages are delivered:
+
+```javascript
+ws.binaryType = 'arraybuffer' // default: 'blob'
+
+ws.onmessage = (event) => {
+  if (event.data instanceof ArrayBuffer) {
+    const view = new Uint8Array(event.data)
+    console.log('Binary data:', view)
+  }
+}
+```
+
+### readyState constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `WebSocket.CONNECTING` | `0` | Connection not yet established |
+| `WebSocket.OPEN` | `1` | Connection is open and ready |
+| `WebSocket.CLOSING` | `2` | Connection is closing |
+| `WebSocket.CLOSED` | `3` | Connection is closed |
+
+### Closing connections
+
+```javascript
+// Graceful close with code and reason
+ws.close(1000, 'Normal closure')
+
+// Close codes: 1000 (normal), 1001 (going away), 1008 (policy violation), etc.
+```
+
+## ping()
+
+The `ping()` function sends a WebSocket ping frame for keepalive or connection verification.
+
+```javascript
+ping(websocket[, payload])
+```
+
+<ParamField path="websocket" type="WebSocket" required>
+  The WebSocket instance to send the ping frame on.
+</ParamField>
+
+<ParamField path="payload" type="Buffer | undefined">
+  Optional payload data. Must not exceed 125 bytes. The server must respond with a pong containing the same payload.
+</ParamField>
+
+```javascript Using ping for keepalive
+import { WebSocket, ping } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events')
+
+ws.addEventListener('open', () => {
+  // Ping with no payload
+  ping(ws)
+
+  // Ping with payload
+  const payload = Buffer.from('keepalive')
+  ping(ws, payload)
+})
+
+// Keepalive interval
+const interval = setInterval(() => {
+  if (ws.readyState === WebSocket.OPEN) {
+    ping(ws)
+  }
+}, 30_000)
+
+ws.addEventListener('close', () => clearInterval(interval))
+```
+
+<Note>
+  `ping()` only sends if the WebSocket is in the `OPEN` state. Payloads must not exceed 125 bytes.
+</Note>
+
+## WebSocketStream
+
+<Warning>
+  `WebSocketStream` is experimental and the API has not been finalized. It is likely to change in future versions.
+</Warning>
+
+`WebSocketStream` provides a stream-based interface to WebSocket connections using WHATWG Streams (readable/writable).
+
+```javascript
+import { WebSocketStream } from 'undici'
+
+const stream = new WebSocketStream('wss://echo.websocket.org/')
+const { readable, writable } = await stream.opened
+
+async function read() {
+  const reader = readable.getReader()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    console.log('Received:', value)
+  }
+}
+
+async function write() {
+  const writer = writable.getWriter()
+  writer.write('Hello, world!')
+  writer.releaseLock()
+}
+
+read()
+setInterval(() => write(), 5000)
+```
+
+See [MDN WebSocketStream](https://developer.mozilla.org/en-US/docs/Web/API/WebSocketStream) for the full API specification.

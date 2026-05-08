@@ -1,0 +1,360 @@
+---
+title: 'Migrating from undici v7 to v8'
+description: "Upgrade from undici v7 to v8: handler API changes, Node.js >=22.19.0 requirement, HTTP/2 defaults, Dispatcher1Wrapper, and new interceptors."
+keywords: ['undici', 'migration', 'upgrade', 'v8', 'breaking changes', 'dispatcher', 'handler']
+---
+
+Undici v8 is a significant release that modernizes the dispatcher handler API, raises the minimum Node.js version, and enables HTTP/2 by default. Most applications using the high-level `request`, `fetch`, `stream`, or `pipeline` APIs will need minimal changes. If you maintain custom dispatchers, interceptors, or handlers that call `dispatch()` directly, you will need to update your handler callbacks before upgrading.
+
+<Warning>
+  Undici v8 contains breaking changes to the handler API. Custom dispatchers and interceptors built against v7's `onConnect`, `onHeaders`, `onData`, `onComplete`, and `onError` callbacks will not work without updates. Review all breaking changes below before upgrading.
+</Warning>
+
+## Before you upgrade
+
+Check three things before installing undici v8:
+
+1. **Node.js version** — v8 requires Node.js `>=22.19.0`. Run `node -v` and upgrade Node.js if needed.
+2. **Custom handlers** — if you wrote custom dispatchers, interceptors, or handler objects passed to `dispatch()`, review the handler API changes in steps 2 and 3.
+3. **HTTP/1.1-only code** — if your application depends on HTTP/1.1 behavior (for example, it checks `connection` headers or relies on upgrade handshakes), plan to set `allowH2: false` explicitly.
+
+## Breaking changes summary
+
+<Warning>
+  The following changes are breaking. Each is covered in detail in the steps below.
+
+  - Node.js `>=22.19.0` is now required (was `>=18.0.0` in v7).
+  - Handler callbacks renamed: `onConnect` → `onRequestStart`, `onHeaders` → `onResponseStart`, `onData` → `onResponseData`, `onComplete` → `onResponseEnd`, `onError` → `onResponseError`, `onUpgrade` → `onRequestUpgrade`.
+  - `onBodySent(chunkSize, totalBytesSent)` signature changed to `onBodySent(chunk)`.
+  - HTTP/2 is now enabled by default when a TLS server negotiates it via ALPN.
+  - Fake Blob-like objects (duck-typed via `Symbol.toStringTag`) are no longer accepted; use real `Blob` or `File` instances.
+  - Direct access to `Symbol.for('undici.globalDispatcher.1')` is no longer supported.
+</Warning>
+
+## Migration steps
+
+<Steps>
+  <Step title="Upgrade Node.js to v22.19.0 or later">
+    Undici v8 requires Node.js `>=22.19.0`. Verify your current version and upgrade if needed.
+
+    ```bash
+    node -v
+    ```
+
+    If the output is lower than `v22.19.0`, upgrade Node.js before proceeding. You can use a version manager such as `nvm` or `fnm`:
+
+    ```bash
+    # Using nvm
+    nvm install 22
+    nvm use 22
+
+    # Using fnm
+    fnm install 22
+    fnm use 22
+    ```
+
+    Once you are on Node.js 22.19.0 or later, install undici v8:
+
+    ```bash
+    npm install undici@8
+    ```
+  </Step>
+
+  <Step title="Update custom handler callbacks">
+    Undici v8 uses a unified dispatcher handler API (referred to internally as the v2 handler API). Every callback that a handler object can implement has been renamed. The controller argument replaces the inline `abort` and `resume` callbacks.
+
+    The full mapping is:
+
+    | v7 callback | v8 callback |
+    |---|---|
+    | `onConnect(abort, context)` | `onRequestStart(controller, context)` |
+    | `onHeaders(statusCode, rawHeaders, resume, statusText)` | `onResponseStart(controller, statusCode, headers, statusText)` |
+    | `onData(chunk)` | `onResponseData(controller, chunk)` |
+    | `onComplete(trailers)` | `onResponseEnd(controller, trailers)` |
+    | `onError(err)` | `onResponseError(controller, err)` |
+    | `onUpgrade(statusCode, rawHeaders, socket)` | `onRequestUpgrade(controller, statusCode, headers, socket)` |
+
+    <Tabs>
+      <Tab title="Before (v7)">
+        ```javascript
+        client.dispatch(options, {
+          onConnect (abort) {
+            this.abort = abort
+          },
+          onHeaders (statusCode, headers, resume) {
+            this.resume = resume
+            return true
+          },
+          onData (chunk) {
+            chunks.push(chunk)
+            return true
+          },
+          onComplete (trailers) {
+            console.log('done', trailers)
+          },
+          onError (err) {
+            console.error(err)
+          }
+        })
+        ```
+      </Tab>
+      <Tab title="After (v8)">
+        ```javascript
+        client.dispatch(options, {
+          onRequestStart (controller) {
+            this.controller = controller
+          },
+          onResponseStart (controller, statusCode, headers, statusText) {
+            console.log(statusCode, statusText, headers)
+          },
+          onResponseData (controller, chunk) {
+            chunks.push(chunk)
+          },
+          onResponseEnd (controller, trailers) {
+            console.log('done', trailers)
+          },
+          onResponseError (controller, err) {
+            console.error(err)
+          }
+        })
+        ```
+      </Tab>
+    </Tabs>
+
+    ### Pause, resume, and abort via the controller
+
+    In v7, handlers could return `false` from `onData` to signal backpressure, or store the `abort` reference passed to `onConnect`. In v8, all flow control goes through the controller object.
+
+    <Tabs>
+      <Tab title="Before (v7)">
+        ```javascript
+        client.dispatch(options, {
+          onConnect (abort) {
+            this.abort = abort
+          },
+          onData (chunk) {
+            // Return false to pause
+            return false
+          },
+          onError (err) {
+            this.abort(err) // // [!code --]
+          }
+        })
+        ```
+      </Tab>
+      <Tab title="After (v8)">
+        ```javascript
+        client.dispatch(options, {
+          onRequestStart (controller) {
+            this.controller = controller
+          },
+          onResponseData (controller, chunk) {
+            controller.pause()
+            setImmediate(() => controller.resume())
+          },
+          onResponseError (controller, err) {
+            controller.abort(err)
+          }
+        })
+        ```
+      </Tab>
+    </Tabs>
+
+    ### Raw headers and trailers
+
+    Raw header and trailer arrays are no longer passed directly as arguments. Read them from the controller:
+
+    ```javascript
+    onResponseStart (controller, statusCode, headers, statusText) {
+      const raw = controller.rawHeaders  // Buffer[] of raw header pairs
+    }
+
+    onResponseEnd (controller, trailers) {
+      const raw = controller.rawTrailers // Buffer[] of raw trailer pairs
+    }
+    ```
+  </Step>
+
+  <Step title="Update onBodySent handlers">
+    If you implemented `onBodySent`, its signature changed in v8. The handler no longer receives byte counters; it receives the actual chunk that was sent.
+
+    <Tabs>
+      <Tab title="Before (v7)">
+        ```javascript
+        client.dispatch(options, {
+          onBodySent (chunkSize, totalBytesSent) { // [!code --]
+            console.log(`sent ${chunkSize} bytes, ${totalBytesSent} total`) // [!code --]
+          }
+        })
+        ```
+      </Tab>
+      <Tab title="After (v8)">
+        ```javascript
+        client.dispatch(options, {
+          onBodySent (chunk) { // [!code ++]
+            console.log(`sent chunk of length ${chunk.length}`) // [!code ++]
+          },
+          onRequestSent () { // [!code ++]
+            console.log('request body fully sent') // [!code ++]
+          }
+        })
+        ```
+      </Tab>
+    </Tabs>
+
+    <Note>
+      Use `onRequestSent()` (no arguments) to receive a notification that the entire request body has been sent. This is the v8 equivalent of the v7 pattern of checking `totalBytesSent` in the final `onBodySent` call.
+    </Note>
+  </Step>
+
+  <Step title="Disable HTTP/2 if you need HTTP/1.1-only behavior">
+    Undici v8 enables HTTP/2 by default when a TLS server advertises `h2` via ALPN during the TLS handshake. If your code relies on HTTP/1.1-specific behavior — for example, it inspects raw `connection` headers, uses HTTP/1.1 upgrade handshakes, or integrates with infrastructure that does not support HTTP/2 — set `allowH2: false` explicitly.
+
+    <Tabs>
+      <Tab title="Before (v7)">
+        ```javascript
+        import { Client, Agent } from 'undici'
+
+        // HTTP/2 was never negotiated in v7
+        const client = new Client('https://example.com')
+
+        const agent = new Agent()
+        ```
+      </Tab>
+      <Tab title="After (v8)">
+        ```javascript
+        import { Client, Agent } from 'undici'
+
+        // Opt out of HTTP/2 to preserve HTTP/1.1-only behavior
+        const client = new Client('https://example.com', {
+          allowH2: false, // [!code ++]
+        })
+
+        const agent = new Agent({
+          allowH2: false, // [!code ++]
+        })
+        ```
+      </Tab>
+    </Tabs>
+
+    <Note>
+      If you do not have a specific requirement to use HTTP/1.1, leave the default. HTTP/2 multiplexing can significantly improve throughput when connecting to servers that support it.
+    </Note>
+  </Step>
+
+  <Step title="Replace fake Blob objects with real Blob or File instances">
+    Undici v8 no longer accepts duck-typed Blob-like objects — objects that only appear to be `Blob` instances by setting `Symbol.toStringTag` to `'Blob'` or `'File'`. You must pass actual `Blob` or `File` instances.
+
+    <Tabs>
+      <Tab title="Before (v7)">
+        ```javascript
+        // Duck-typed Blob — no longer accepted in v8
+        const fakeBlob = {
+          [Symbol.toStringTag]: 'Blob', // [!code --]
+          size: 5,
+          type: 'text/plain',
+          async arrayBuffer () { return Buffer.from('hello') },
+          stream () { /* ... */ },
+          text () { return Promise.resolve('hello') }
+        }
+
+        await fetch('https://example.com/upload', {
+          method: 'POST',
+          body: fakeBlob
+        })
+        ```
+      </Tab>
+      <Tab title="After (v8)">
+        ```javascript
+        // Use a real Blob instance
+        const body = new Blob(['hello'], { type: 'text/plain' }) // [!code ++]
+
+        await fetch('https://example.com/upload', {
+          method: 'POST',
+          body
+        })
+
+        // Or use File for named uploads
+        const file = new File(['hello'], 'hello.txt', { type: 'text/plain' }) // [!code ++]
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Replace direct global dispatcher symbol access with public APIs">
+    Undici v8 changed the internal symbol used to store the global dispatcher from `Symbol.for('undici.globalDispatcher.1')` to `Symbol.for('undici.globalDispatcher.2')`. If your code accessed the old symbol directly, migrate to the public `setGlobalDispatcher` and `getGlobalDispatcher` APIs.
+
+    <Tabs>
+      <Tab title="Before (v7)">
+        ```javascript
+        // Direct symbol access — do not do this
+        const dispatcher = globalThis[Symbol.for('undici.globalDispatcher.1')] // [!code --]
+        ```
+      </Tab>
+      <Tab title="After (v8)">
+        ```javascript
+        import { setGlobalDispatcher, getGlobalDispatcher, Agent } from 'undici'
+
+        // Set a custom dispatcher globally
+        setGlobalDispatcher(new Agent()) // [!code ++]
+
+        // Read the current global dispatcher
+        const dispatcher = getGlobalDispatcher() // [!code ++]
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Use Dispatcher1Wrapper for legacy v1 handler consumers (if needed)">
+    Undici v8 ships a `Dispatcher1Wrapper` compatibility shim. It wraps a v2-style dispatcher so that legacy consumers still using v1 handler callbacks (such as older versions of Node.js built-in `fetch`) can continue to work.
+
+    You do not need this if you are only using undici directly. It is primarily useful when you need to expose a custom dispatcher to a consumer that calls v1-style handler callbacks internally.
+
+    ```javascript
+    import { Agent, Dispatcher1Wrapper } from 'undici'
+
+    // Wrap a v2 dispatcher in a v1-compatible shim
+    const legacyCompatibleDispatcher = new Dispatcher1Wrapper(new Agent())
+
+    // Pass to a legacy consumer
+    setGlobalDispatcher(legacyCompatibleDispatcher)
+    ```
+
+    <Note>
+      `Dispatcher1Wrapper` is exported from the top-level `undici` package. You do not need to import it from an internal path.
+    </Note>
+  </Step>
+
+  <Step title="Verify the upgrade">
+    After updating your code, run your test suite against the areas most likely to be affected:
+
+    - Requests that use a custom `dispatcher` option
+    - `setGlobalDispatcher()` and `getGlobalDispatcher()` behavior
+    - Custom interceptors and retry handlers
+    - Uploads that use `Blob`, `File`, or `FormData`
+    - Integrations that depend on HTTP/1.1-only behavior
+
+    ```bash
+    npm test
+    ```
+  </Step>
+</Steps>
+
+## What's new in v8
+
+Beyond the breaking changes, v8 introduces several new capabilities:
+
+- **HTTP/2 by default** — connections to TLS servers that advertise `h2` via ALPN now automatically use HTTP/2 multiplexing without any configuration.
+- **`Dispatcher1Wrapper`** — a new export that wraps a v2-style dispatcher so it can be used by legacy v1 handler consumers, enabling gradual ecosystem migration.
+- **`H2CClient`** — a new dispatcher for HTTP/2 cleartext (h2c) connections, exported directly from the undici package.
+- **`RoundRobinPool`** — a new pool variant that distributes requests in a round-robin fashion across a set of clients.
+- **`SnapshotAgent`** — a new mock utility for recording and replaying HTTP interactions in tests.
+- **`deduplicate` interceptor** — a new built-in interceptor that deduplicates concurrent identical requests, sending only one upstream request and sharing the response.
+- **`decompress` interceptor** — a new built-in interceptor that handles response decompression.
+
+## Related documentation
+
+- [Dispatcher API](/api/dispatcher)
+- [Client API](/api/client)
+- [Global installation](/api/globals)
+- [undici vs. built-in fetch](/undici-vs-fetch)

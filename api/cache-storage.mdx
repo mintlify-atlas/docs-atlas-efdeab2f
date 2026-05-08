@@ -1,0 +1,168 @@
+---
+title: "CacheStorage and Cache API"
+description: "undici exports a W3C-compliant CacheStorage and Cache API for storing and retrieving HTTP responses — the same interface available in browsers and Service Workers."
+---
+
+undici exports a top-level `caches` instance that implements the W3C [CacheStorage](https://developer.mozilla.org/en-US/docs/Web/API/CacheStorage) and [Cache](https://developer.mozilla.org/en-US/docs/Web/API/Cache) APIs. This allows you to store and retrieve `Request`/`Response` pairs programmatically using the same interface available in browser Service Workers.
+
+<Note>
+  The `caches` API is for programmatic cache management. For automatic HTTP response caching based on `Cache-Control` headers, use [`interceptors.cache`](/api/interceptors) instead.
+</Note>
+
+## Importing
+
+```javascript
+import { caches } from 'undici'
+```
+
+## CacheStorage
+
+The `caches` export is a singleton `CacheStorage` instance.
+
+### `caches.open(cacheName)`
+
+Opens a named cache, creating it if it doesn't exist. If you open a cache with the same name twice, both instances share the same underlying response list.
+
+```javascript Opening a cache
+import { caches } from 'undici'
+
+const cache = await caches.open('v1')
+
+// Sharing state between instances
+const cache1 = await caches.open('v1')
+const cache2 = await caches.open('v1')
+
+// cache1 and cache2 are different objects
+console.log(cache1 !== cache2) // true
+
+// But they share the same cached responses
+await cache1.put('/api/data', new Response('hello'))
+const response = await cache2.match('/api/data')
+console.log(await response.text()) // 'hello'
+```
+
+<ParamField path="cacheName" type="string" required>
+  The name of the cache to open.
+</ParamField>
+
+Returns: `Promise<Cache>`
+
+### `caches.has(cacheName)`
+
+Returns `true` if a cache with the given name exists.
+
+```javascript
+const exists = await caches.has('v1')
+console.log(exists) // true or false
+```
+
+### `caches.delete(cacheName)`
+
+Deletes a named cache. Existing `Response` objects from the deleted cache remain usable.
+
+```javascript
+import { caches } from 'undici'
+
+const cache = await caches.open('v1')
+await cache.put('/req', new Response('data'))
+
+const response = await cache.match('/req')
+await caches.delete('v1')
+
+// Response body is still accessible after cache deletion
+const text = await response.text()
+console.log(text) // 'data'
+```
+
+### `caches.keys()`
+
+Returns all cache names.
+
+```javascript
+const cacheNames = await caches.keys()
+console.log(cacheNames) // ['v1', 'v2']
+```
+
+## Cache
+
+### `cache.put(request, response)`
+
+Stores a response for a given request.
+
+```javascript
+import { caches, Request, Response } from 'undici'
+
+const cache = await caches.open('v1')
+
+await cache.put('/api/users', new Response(JSON.stringify([{ id: 1 }]), {
+  headers: { 'content-type': 'application/json' }
+}))
+```
+
+### `cache.match(request[, options])`
+
+Returns the first matching response, or `undefined` if none found.
+
+```javascript
+const response = await cache.match('/api/users')
+if (response) {
+  const users = await response.json()
+}
+```
+
+### `cache.matchAll(request[, options])`
+
+Returns all matching responses.
+
+### `cache.add(request)`
+
+Fetches a URL and stores the response in the cache.
+
+### `cache.addAll(requests)`
+
+Fetches multiple URLs and caches all responses.
+
+### `cache.delete(request[, options])`
+
+Removes cached entries matching the request.
+
+```javascript
+await cache.delete('/api/users')
+```
+
+### `cache.keys([request[, options]])`
+
+Returns cached request keys.
+
+```javascript
+const keys = await cache.keys()
+for (const request of keys) {
+  console.log(request.url)
+}
+```
+
+## Version-based caching pattern
+
+A common pattern is versioning caches to handle cache invalidation:
+
+```javascript Cache versioning pattern
+import { caches } from 'undici'
+
+const CACHE_VERSION = 'v2'
+const PREVIOUS_VERSIONS = ['v1']
+
+// Clean up old caches
+const cacheNames = await caches.keys()
+for (const name of cacheNames) {
+  if (PREVIOUS_VERSIONS.includes(name)) {
+    await caches.delete(name)
+  }
+}
+
+// Use current version
+const cache = await caches.open(CACHE_VERSION)
+```
+
+<Note>
+  For more details, see the [MDN CacheStorage](https://developer.mozilla.org/en-US/docs/Web/API/CacheStorage) and [MDN Cache](https://developer.mozilla.org/en-US/docs/Web/API/Cache) documentation.
+</Note>

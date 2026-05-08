@@ -1,0 +1,344 @@
+---
+title: "Client: single-connection HTTP/1.1 and HTTP/2"
+description: "API reference for undici Client — a single TCP/TLS connection dispatcher with pipelining, HTTP/2, keep-alive tuning, TLS options, and the H2CClient variant."
+keywords: ["undici", "client", "http client", "pipelining", "http2", "h2c", "node.js"]
+---
+
+`Client` maps each instance to a single TCP or TLS connection to a given origin. Pipelining is disabled by default (`pipelining: 1`), meaning each connection handles one request at a time. You can raise `pipelining` to send multiple requests over the same connection concurrently, or use `Pool` when you need multiple connections to the same origin.
+
+<Note>
+  `Client` is a concrete implementation of `Dispatcher`. All methods
+  (`request`, `stream`, `pipeline`, `dispatch`, `connect`, `upgrade`,
+  `close`, `destroy`) are inherited from `Dispatcher` — see the
+  [Dispatcher reference](/api/dispatcher) for full method signatures.
+</Note>
+
+## Constructor
+
+### `new Client(url, options?)`
+
+<ParamField path="body.url" type="URL | string" required>
+  The origin URL. Should include only the protocol, hostname, and port —
+  no path, query string, or fragment.
+</ParamField>
+
+<ParamField path="body.options" type="ClientOptions">
+  Configuration object. All fields are optional.
+</ParamField>
+
+```javascript title="Basic instantiation"
+import { Client } from 'undici'
+
+const client = new Client('https://api.example.com')
+```
+
+The client does not connect until the first request is dispatched.
+
+## Constructor options
+
+### Timeout options
+
+<ParamField path="body.headersTimeout" type="number | null" default="300000">
+  Milliseconds to wait for the complete HTTP headers while not sending. Set
+  to `0` to disable.
+</ParamField>
+
+<ParamField path="body.bodyTimeout" type="number | null" default="300000">
+  Milliseconds of inactivity between body data chunks. Resets each time data
+  is received. Set to `0` to disable.
+</ParamField>
+
+### Keep-alive options
+
+<ParamField path="body.keepAliveTimeout" type="number | null" default="4000">
+  Milliseconds before an idle socket is closed. May be overridden by
+  server `keep-alive` hints.
+</ParamField>
+
+<ParamField path="body.keepAliveMaxTimeout" type="number | null" default="600000">
+  Maximum milliseconds for keep-alive, even if the server hints a higher
+  value.
+</ParamField>
+
+<ParamField path="body.keepAliveTimeoutThreshold" type="number | null" default="2000">
+  Milliseconds subtracted from server keep-alive hints to account for
+  transport latency.
+</ParamField>
+
+### Pipelining and concurrency
+
+<ParamField path="body.pipelining" type="number | null" default="1">
+  Number of concurrent requests to send over the single connection per
+  [RFC 7230](https://tools.ietf.org/html/rfc7230#section-6.3.2). Set to `0`
+  to disable keep-alive connections entirely.
+
+  <Warning>
+    Pipelining can reduce performance if used incorrectly. Consider your
+    workload and any head-of-line blocking caused by long-running requests
+    before raising this value.
+  </Warning>
+</ParamField>
+
+### Size limits
+
+<ParamField path="body.maxHeaderSize" type="number | null" default="Node.js --max-http-header-size (16384)">
+  Maximum request header size in bytes.
+</ParamField>
+
+<ParamField path="body.maxResponseSize" type="number | null" default="-1">
+  Maximum response body size in bytes. Set to `-1` to disable.
+</ParamField>
+
+### Connection options
+
+<ParamField path="body.connect" type="ConnectOptions | Function | null" default="null">
+  TLS/socket configuration. Pass an options object to configure TLS, or a
+  custom connector function for full control over the socket.
+
+  <Expandable title="ConnectOptions fields">
+    <ParamField path="body.socketPath" type="string | null" default="null">
+      Unix domain socket path or Windows named pipe for IPC connections.
+    </ParamField>
+    <ParamField path="body.timeout" type="number | null" default="10000">
+      Connection timeout in milliseconds.
+    </ParamField>
+    <ParamField path="body.maxCachedSessions" type="number | null" default="100">
+      Maximum TLS sessions to cache. Set to `0` to disable TLS session caching.
+    </ParamField>
+    <ParamField path="body.servername" type="string | null">
+      TLS SNI servername override.
+    </ParamField>
+    <ParamField path="body.keepAlive" type="boolean | null" default="true">
+      Enable TCP keep-alive.
+    </ParamField>
+    <ParamField path="body.keepAliveInitialDelay" type="number | null" default="60000">
+      TCP keep-alive interval in milliseconds.
+    </ParamField>
+  </Expandable>
+
+  All Node.js [TLS options](https://nodejs.org/api/tls.html#tls_tls_connect_options_callback) are also accepted.
+</ParamField>
+
+<ParamField path="body.strictContentLength" type="boolean" default="true">
+  Throw an error when the `content-length` header does not match the actual
+  body length.
+
+  <Warning>
+    Disabling `strictContentLength` exposes your application to HTTP Request
+    Smuggling attacks. Only disable this in fully trusted, controlled
+    environments.
+  </Warning>
+</ParamField>
+
+### Address selection
+
+<ParamField path="body.autoSelectFamily" type="boolean" default="false (Node ≥ 18.13)">
+  Enable Happy Eyeballs (RFC 8305 §5) to auto-select between IPv4 and IPv6.
+</ParamField>
+
+<ParamField path="body.autoSelectFamilyAttemptTimeout" type="number" default="250 (Node ≥ 18.13)">
+  Milliseconds to wait for each address family attempt when `autoSelectFamily`
+  is enabled.
+</ParamField>
+
+### HTTP/2 options
+
+<ParamField path="body.allowH2" type="boolean" default="true">
+  Enable HTTP/2 via ALPN negotiation over TLS. The server must prefer HTTP/2
+  over HTTP/1.1.
+</ParamField>
+
+<ParamField path="body.maxConcurrentStreams" type="number" default="100">
+  Maximum concurrent streams per HTTP/2 session. Can be overridden by the
+  server's `SETTINGS` frame.
+</ParamField>
+
+<ParamField path="body.initialWindowSize" type="number" default="262144">
+  HTTP/2 stream-level flow-control window size in bytes
+  (`SETTINGS_INITIAL_WINDOW_SIZE`). Higher than Node.js defaults for better
+  throughput on high-bandwidth networks.
+</ParamField>
+
+<ParamField path="body.connectionWindowSize" type="number" default="524288">
+  HTTP/2 connection-level flow-control window size in bytes.
+</ParamField>
+
+<ParamField path="body.pingInterval" type="number" default="60000">
+  Milliseconds between HTTP/2 PING frames. Set to `0` to disable. Emits a
+  `ping` event on the client with the round-trip duration.
+</ParamField>
+
+<Note>
+  HTTP/2 (`allowH2`) requires a TLS connection. The server must negotiate
+  HTTP/2 via ALPN. Pseudo-headers (`:path`, `:method`, `:scheme`,
+  `:authority`) are set automatically and cannot be overridden.
+</Note>
+
+### WebSocket options
+
+<ParamField path="body.webSocket" type="WebSocketOptions">
+  <Expandable title="WebSocketOptions fields">
+    <ParamField path="body.maxPayloadSize" type="number" default="134217728">
+      Maximum WebSocket message payload size in bytes (128 MB). Set to `0` to
+      disable the limit.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+---
+
+## Properties
+
+<ResponseField name="client.closed" type="boolean">
+  `true` after `client.close()` has been called.
+</ResponseField>
+
+<ResponseField name="client.destroyed" type="boolean">
+  `true` after `client.destroy()` has been called or `client.close()` has
+  fully completed.
+</ResponseField>
+
+<ResponseField name="client.pipelining" type="number">
+  Read/write. The current pipelining factor. Changing this takes effect for
+  future requests.
+</ResponseField>
+
+<ResponseField name="client.stats" type="ClientStats">
+  Live statistics for this client.
+
+  <Expandable title="ClientStats fields">
+    <ResponseField name="connected" type="boolean">
+      Whether the socket has an open connection.
+    </ResponseField>
+    <ResponseField name="pending" type="number">
+      Number of requests waiting to be sent.
+    </ResponseField>
+    <ResponseField name="running" type="number">
+      Number of requests currently in-flight.
+    </ResponseField>
+    <ResponseField name="size" type="number">
+      Total active, pending, and queued requests.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Events
+
+<ResponseField name="connect" type="event">
+  Emitted when a socket connects. Parameters: `origin: URL`, `targets: Dispatcher[]`.
+</ResponseField>
+
+<ResponseField name="disconnect" type="event">
+  Emitted when the socket disconnects. The client reconnects automatically
+  when `client.size > 0`. Parameters: `origin: URL`, `targets: Dispatcher[]`, `error: Error`.
+</ResponseField>
+
+<ResponseField name="drain" type="event">
+  Emitted when the request pipeline is no longer busy. Parameters: `origin: URL`.
+</ResponseField>
+
+<ResponseField name="error" type="event">
+  Emitted for user-level errors such as exceptions thrown in `onResponseError`.
+</ResponseField>
+
+---
+
+## Code examples
+
+<Tabs>
+  <Tab title="ESM">
+    ```javascript title="Basic request"
+    import { Client } from 'undici'
+
+    const client = new Client('https://api.example.com')
+
+    const { statusCode, headers, body } = await client.request({
+      path: '/users/1',
+      method: 'GET',
+    })
+
+    console.log(statusCode) // 200
+    const user = await body.json()
+
+    await client.close()
+    ```
+  </Tab>
+  <Tab title="CJS">
+    ```javascript title="Basic request (CommonJS)"
+    const { Client } = require('undici')
+
+    const client = new Client('https://api.example.com')
+
+    client.request({ path: '/users/1', method: 'GET' })
+      .then(async ({ statusCode, body }) => {
+        console.log(statusCode)
+        console.log(await body.json())
+        return client.close()
+      })
+    ```
+  </Tab>
+</Tabs>
+
+```javascript title="Pipelining — multiple concurrent requests on one connection"
+import { Client } from 'undici'
+
+const client = new Client('https://api.example.com', { pipelining: 4 })
+
+const results = await Promise.all([
+  client.request({ path: '/a', method: 'GET' }),
+  client.request({ path: '/b', method: 'GET' }),
+  client.request({ path: '/c', method: 'GET' }),
+  client.request({ path: '/d', method: 'GET' }),
+])
+
+console.log(results.map(r => r.statusCode))
+await client.close()
+```
+
+```javascript title="Custom TLS connector"
+import { Client, buildConnector } from 'undici'
+
+const connector = buildConnector({ rejectUnauthorized: false })
+
+const client = new Client('https://localhost:3000', {
+  connect(opts, cb) {
+    connector(opts, (err, socket) => {
+      if (err) return cb(err)
+      // inspect or mutate the socket here
+      cb(null, socket)
+    })
+  },
+})
+```
+
+---
+
+## H2CClient
+
+`H2CClient` is a specialised `Client` variant that enforces HTTP/2 cleartext (`h2c`) over plain TCP — no TLS required. It accepts the same options as `Client` except those specific to TLS negotiation.
+
+<Warning>
+  `H2CClient` only supports the `http:` protocol. Use it when the server
+  speaks HTTP/2 over a plain connection (no TLS). For HTTP/2 over TLS,
+  use `Client` with `allowH2: true`.
+</Warning>
+
+```javascript title="H2CClient basic usage"
+import { H2CClient } from 'undici'
+
+const client = new H2CClient('http://localhost:3000')
+
+const { statusCode, body } = await client.request({
+  path: '/',
+  method: 'GET',
+})
+
+console.log(statusCode) // 200
+console.log(await body.text()) // Hello, world!
+
+await client.close()
+```
+
+`H2CClient` supports the same `maxConcurrentStreams`, `pingInterval`, `headersTimeout`, `bodyTimeout`, `keepAliveTimeout`, `keepAliveMaxTimeout`, `pipelining`, `strictContentLength`, and `connect` options as `Client`.

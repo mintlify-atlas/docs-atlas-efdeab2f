@@ -1,0 +1,341 @@
+---
+title: 'Global Configuration: dispatcher, origin, install'
+description: "Reference for undici global configuration: setGlobalDispatcher, getGlobalDispatcher, setGlobalOrigin, getGlobalOrigin, and install() to polyfill fetch globals."
+keywords: ['undici', 'setGlobalDispatcher', 'getGlobalDispatcher', 'setGlobalOrigin', 'getGlobalOrigin', 'install', 'global', 'dispatcher']
+---
+
+Undici maintains a small set of global state that controls the default behavior of top-level functions like `request`, `stream`, and `fetch`. You can replace the global dispatcher to apply connection pooling, proxy routing, retry logic, or caching to every request made through undici without changing individual call sites.
+
+<Note>
+The global dispatcher is stored under `Symbol.for('undici.globalDispatcher.2')`. A legacy mirror is kept at `Symbol.for('undici.globalDispatcher.1')` via `Dispatcher1Wrapper` for compatibility with Node.js built-in `fetch`, which uses the older handler contract.
+</Note>
+
+---
+
+## `setGlobalDispatcher(dispatcher)`
+
+Replaces the global dispatcher used by `request`, `stream`, `pipeline`,
+`connect`, `upgrade`, and `fetch` when no per-call `dispatcher` option is
+provided.
+
+The dispatcher must be an object with a `dispatch` method — any `Dispatcher`
+subclass qualifies (`Agent`, `Pool`, `Client`, `ProxyAgent`, etc.).
+
+When set, undici also writes a `Dispatcher1Wrapper`-wrapped copy of the
+dispatcher to `Symbol.for('undici.globalDispatcher.1')` so that Node.js
+built-in `fetch` continues to work via the legacy handler contract.
+
+<CodeGroup>
+
+```javascript ESM
+import { setGlobalDispatcher, Agent } from 'undici'
+
+setGlobalDispatcher(new Agent({
+  connections: 10,
+  keepAliveTimeout: 30_000
+}))
+```
+
+```javascript CJS
+const { setGlobalDispatcher, Agent } = require('undici')
+
+setGlobalDispatcher(new Agent({
+  connections: 10,
+  keepAliveTimeout: 30_000
+}))
+```
+
+</CodeGroup>
+
+### Parameters
+
+<ParamField path="dispatcher" type="Dispatcher" required>
+  Any `Dispatcher` instance. Must expose a `dispatch` method. Passing a value
+  without `dispatch` throws an `InvalidArgumentError`.
+</ParamField>
+
+### Common patterns
+
+<Tabs>
+  <Tab title="Agent with interceptors">
+    ```javascript Caching + retry interceptors
+    import { setGlobalDispatcher, Agent, interceptors, cacheStores } from 'undici'
+    const { cache, retry } = interceptors
+
+    setGlobalDispatcher(
+      new Agent().compose(
+        cache({
+          store: new cacheStores.MemoryCacheStore({
+            maxSize: 50 * 1024 * 1024 // 50 MB
+          })
+        }),
+        retry({ maxRetries: 3 })
+      )
+    )
+    ```
+  </Tab>
+  <Tab title="ProxyAgent">
+    ```javascript HTTP proxy
+    import { setGlobalDispatcher, ProxyAgent } from 'undici'
+
+    setGlobalDispatcher(new ProxyAgent('http://proxy.corp.example.com:8080'))
+    ```
+  </Tab>
+  <Tab title="EnvHttpProxyAgent">
+    ```javascript Respect HTTP_PROXY env vars
+    import { setGlobalDispatcher, EnvHttpProxyAgent } from 'undici'
+
+    // Reads HTTP_PROXY, HTTPS_PROXY, NO_PROXY from the environment
+    setGlobalDispatcher(new EnvHttpProxyAgent())
+    ```
+  </Tab>
+</Tabs>
+
+### Compatibility with Node.js built-in fetch
+
+Undici stores the active dispatcher under two symbols to ensure compatibility:
+
+| Symbol | Consumer |
+|--------|----------|
+| `Symbol.for('undici.globalDispatcher.2')` | undici `request`, `stream`, `fetch`, etc. |
+| `Symbol.for('undici.globalDispatcher.1')` | Node.js built-in `fetch` (legacy handler contract) |
+
+`setGlobalDispatcher` writes to both automatically. If you need to expose a
+custom dispatcher only to legacy consumers, wrap it manually:
+
+```javascript Exposing a custom dispatcher to legacy consumers
+import { Agent, Dispatcher1Wrapper } from 'undici'
+
+const legacyDispatcher = new Dispatcher1Wrapper(new Agent())
+// Use legacyDispatcher where the v1 handler API (onConnect/onHeaders/...) is expected
+```
+
+---
+
+## `getGlobalDispatcher()`
+
+Returns the current global dispatcher. The default value is a shared `Agent`
+instance created at module load time.
+
+```javascript Inspecting the global dispatcher
+import { getGlobalDispatcher } from 'undici'
+
+const dispatcher = getGlobalDispatcher()
+console.log(dispatcher.constructor.name) // 'Agent' by default
+```
+
+### Return value
+
+<ResponseField name="dispatcher" type="Dispatcher">
+  The active global dispatcher. Returns an `Agent` instance unless overridden
+  with `setGlobalDispatcher`.
+</ResponseField>
+
+---
+
+## `setGlobalOrigin(origin)`
+
+Sets the base URL resolved against when `fetch` receives a relative URL path.
+Once set, you can call `fetch('/api/ping')` instead of specifying the full URL.
+
+Only `http:` and `https:` origins are accepted. Passing any other protocol
+throws a `TypeError`.
+
+Pass `undefined` to clear the global origin and revert to requiring absolute
+URLs.
+
+<CodeGroup>
+
+```javascript ESM
+import { setGlobalOrigin, fetch } from 'undici'
+
+setGlobalOrigin('http://localhost:3000')
+
+// Now relative paths resolve against http://localhost:3000
+const response = await fetch('/api/health')
+const data = await response.json()
+```
+
+```javascript CJS
+const { setGlobalOrigin, fetch } = require('undici')
+
+setGlobalOrigin('http://localhost:3000')
+
+const response = await fetch('/api/health')
+const data = await response.json()
+```
+
+</CodeGroup>
+
+### Parameters
+
+<ParamField path="origin" type="string | URL | undefined" required>
+  The base origin to set. Must be an `http:` or `https:` URL. Only the origin
+  portion (protocol + host + port) is used — any path, query, or fragment is
+  discarded.
+
+  Pass `undefined` to reset the global origin. After resetting, relative URLs
+  passed to `fetch` throw a `TypeError`.
+</ParamField>
+
+### Example — resetting the origin
+
+```javascript Resetting the global origin
+import { setGlobalOrigin, fetch } from 'undici'
+
+setGlobalOrigin('http://localhost:3000')
+
+// ... later, during teardown or test cleanup:
+setGlobalOrigin(undefined)
+
+// This will now throw TypeError: Failed to parse URL
+await fetch('/api/ping')
+```
+
+<Warning>
+`setGlobalOrigin` only affects `fetch` with relative URLs. Top-level dispatch
+functions (`request`, `stream`, etc.) always require an absolute URL.
+</Warning>
+
+---
+
+## `getGlobalOrigin()`
+
+Returns the currently configured global origin, or `undefined` if none has
+been set.
+
+```javascript Reading the global origin
+import { setGlobalOrigin, getGlobalOrigin } from 'undici'
+
+setGlobalOrigin('https://api.example.com')
+
+const origin = getGlobalOrigin()
+console.log(origin.href) // 'https://api.example.com/'
+console.log(origin instanceof URL) // true
+```
+
+### Return value
+
+<ResponseField name="origin" type="URL | undefined">
+  The global origin as a `URL` object, or `undefined` if not set.
+</ResponseField>
+
+---
+
+## `install()`
+
+Installs undici's web API implementations onto `globalThis`, making them
+available globally without explicit imports. This is useful for polyfilling
+environments, ensuring consistent fetch behavior across Node.js versions, or
+satisfying third-party libraries that expect standard browser globals.
+
+After calling `install()`, all listed globals come from undici's
+implementation. They form a matched set, so `FormData` and `fetch` are
+guaranteed to be compatible.
+
+<CodeGroup>
+
+```javascript ESM
+import { install } from 'undici'
+
+install()
+
+// All of the following are now undici's implementations:
+const response = await fetch('https://api.example.com')
+const headers = new Headers({ 'content-type': 'application/json' })
+const form = new FormData()
+const ws = new WebSocket('wss://ws.example.com')
+const es = new EventSource('https://sse.example.com/events')
+```
+
+```javascript CJS
+const { install } = require('undici')
+
+install()
+
+const response = await fetch('https://api.example.com')
+```
+
+</CodeGroup>
+
+### Installed globals
+
+`install()` assigns the following properties on `globalThis`:
+
+| Global | Type | Description |
+|--------|------|-------------|
+| `fetch` | function | WHATWG Fetch function |
+| `Headers` | class | HTTP headers container |
+| `Response` | class | HTTP response representation |
+| `Request` | class | HTTP request representation |
+| `FormData` | class | Multipart form data builder |
+| `WebSocket` | class | WebSocket client |
+| `CloseEvent` | class | WebSocket close event |
+| `ErrorEvent` | class | WebSocket error event |
+| `MessageEvent` | class | WebSocket/EventSource message event |
+| `EventSource` | class | Server-sent events client |
+
+<Warning>
+`install()` overwrites any existing globals with the same names, including
+Node.js built-in implementations. The replacement persists for the lifetime of
+the process. Call it once, early in your application's startup.
+</Warning>
+
+### When to use `install()`
+
+<AccordionGroup>
+  <Accordion title="Polyfilling older Node.js versions">
+    Node.js added built-in `fetch` in v18 (unflagged in v21). If you need
+    undici's implementation on older runtimes, or you want undici's latest
+    features regardless of the Node.js version:
+
+    ```javascript Conditional install
+    import { install } from 'undici'
+
+    if (typeof globalThis.fetch === 'undefined') {
+      install()
+    }
+    ```
+  </Accordion>
+  <Accordion title="Consistent FormData + fetch pairing">
+    The safest pattern when using `FormData` with `fetch` is to ensure both
+    come from the same implementation. `install()` guarantees this:
+
+    ```javascript After install(), FormData and fetch are always paired
+    import { install } from 'undici'
+
+    install()
+
+    const body = new FormData()
+    body.append('field', 'value')
+
+    // Both FormData and fetch come from undici — safe to use together
+    await fetch('https://example.com/upload', { method: 'POST', body })
+    ```
+
+    Alternatively, import both directly from `undici` without calling `install()`:
+
+    ```javascript Direct import — no globals needed
+    import { fetch, FormData } from 'undici'
+
+    const body = new FormData()
+    await fetch('https://example.com/upload', { method: 'POST', body })
+    ```
+  </Accordion>
+  <Accordion title="Test environments">
+    When you need deterministic fetch behavior in tests regardless of the
+    Node.js version or environment:
+
+    ```javascript Test setup file
+    import { install } from 'undici'
+
+    // Run once in global test setup
+    install()
+    ```
+  </Accordion>
+  <Accordion title="Third-party library compatibility">
+    Some libraries (e.g. SDKs that target both browser and Node.js) rely on
+    globally available `fetch`, `Headers`, `Request`, and `Response`. Calling
+    `install()` satisfies those expectations without patching the libraries.
+  </Accordion>
+</AccordionGroup>

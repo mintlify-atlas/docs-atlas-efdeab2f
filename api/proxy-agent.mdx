@@ -1,0 +1,305 @@
+---
+title: "ProxyAgent, Socks5ProxyAgent, EnvHttpProxyAgent"
+description: "Route undici HTTP requests through HTTP, HTTPS, SOCKS5, or environment-configured proxies using ProxyAgent, Socks5ProxyAgent, and EnvHttpProxyAgent."
+keywords: ["undici", "proxy", "proxy agent", "socks5", "http proxy", "https proxy", "node.js"]
+---
+
+undici ships three proxy dispatcher classes. `ProxyAgent` routes requests through an HTTP or HTTPS proxy. `Socks5ProxyAgent` tunnels through a SOCKS5 proxy. `EnvHttpProxyAgent` reads proxy configuration from the process environment, making it a drop-in way to honour standard proxy environment variables without changing application code.
+
+All three extend `Dispatcher` and can be used per-request via the `dispatcher` option, or globally via `setGlobalDispatcher`.
+
+---
+
+## ProxyAgent
+
+`ProxyAgent` routes requests through an HTTP/HTTPS proxy server. For secure targets (`https:`), it always establishes a CONNECT tunnel. For plain HTTP targets, it sends requests directly to the proxy with the full origin URL prepended to the path (unless `proxyTunnel: true` is set).
+
+### `new ProxyAgent(options)` or `new ProxyAgent(url)`
+
+You can pass the proxy URI directly as a string/URL, or as an options object.
+
+<ParamField path="body.uri" type="string | URL" required>
+  The proxy server URI (e.g. `http://proxy.example.com:8080`). When passing
+  options as a plain string or `URL`, this is the entire first argument.
+</ParamField>
+
+<ParamField path="body.token" type="string">
+  Value for the `proxy-authorization` header. Typically a `Basic` or `Bearer`
+  token string.
+</ParamField>
+
+<ParamField path="body.auth" type="string" deprecated>
+  Deprecated. Use `token` instead.
+</ParamField>
+
+<ParamField path="body.proxyTls" type="BuildOptions">
+  TLS options for the connection to the proxy server. Extends
+  [`ConnectOptions`](/api/client).
+</ParamField>
+
+<ParamField path="body.requestTls" type="BuildOptions">
+  TLS options for the connection to the target origin through the proxy tunnel.
+  Extends [`ConnectOptions`](/api/client).
+</ParamField>
+
+<ParamField path="body.proxyTunnel" type="boolean" default="false">
+  When `true`, establishes a CONNECT tunnel even for unencrypted
+  (HTTP) proxy/endpoint connections. When `false` (default), plain
+  HTTP requests are forwarded directly to the proxy without tunneling.
+</ParamField>
+
+<ParamField path="body.clientFactory" type="(origin: URL, opts: object) => Dispatcher" default="(origin, opts) => new Pool(origin, opts)">
+  Custom factory for the per-origin dispatcher used to send requests through
+  the proxy.
+</ParamField>
+
+All [`AgentOptions`](/api/agent) are accepted (except `connect`, which is replaced by `proxyTls`/`requestTls`).
+
+<Note>
+  When `connections` is set to a non-zero value, ProxyAgent adds the
+  non-standard `proxy-connection: keep-alive` header to requests.
+</Note>
+
+### Methods
+
+`ProxyAgent` implements the full `Dispatcher` interface. The most commonly used methods are:
+
+- **`proxyAgent.request(options)`** — same signature as [`Dispatcher.request`](/api/dispatcher#requestoptions-callback).
+- **`proxyAgent.close()`** — gracefully closes all underlying pools and clients.
+- **`proxyAgent.dispatch(options, handler)`** — low-level dispatch.
+
+### Code examples
+
+<Tabs>
+  <Tab title="Global dispatcher">
+    ```javascript title="Route all requests through a proxy"
+    import { ProxyAgent, setGlobalDispatcher, request } from 'undici'
+
+    const proxyAgent = new ProxyAgent('http://proxy.example.com:8080')
+    setGlobalDispatcher(proxyAgent)
+
+    const { statusCode, body } = await request('https://api.example.com/data')
+    console.log(statusCode)
+    console.log(await body.json())
+    ```
+  </Tab>
+  <Tab title="Per-request">
+    ```javascript title="Proxy for a single request"
+    import { ProxyAgent, request } from 'undici'
+
+    const proxyAgent = new ProxyAgent('http://proxy.example.com:8080')
+
+    const { statusCode, body } = await request('https://api.example.com/data', {
+      dispatcher: proxyAgent,
+    })
+    console.log(await body.json())
+    ```
+  </Tab>
+  <Tab title="With fetch">
+    ```javascript title="Proxy with fetch()"
+    import { ProxyAgent, fetch } from 'undici'
+
+    const proxyAgent = new ProxyAgent('http://proxy.example.com:8080')
+
+    const response = await fetch('https://api.example.com/data', {
+      dispatcher: proxyAgent,
+    })
+    console.log(await response.json())
+    ```
+  </Tab>
+</Tabs>
+
+```javascript title="Proxy with Basic authentication"
+import { ProxyAgent, setGlobalDispatcher, request } from 'undici'
+
+const credentials = Buffer.from('username:password').toString('base64')
+
+const proxyAgent = new ProxyAgent({
+  uri: 'http://proxy.example.com:8080',
+  token: `Basic ${credentials}`,
+})
+
+setGlobalDispatcher(proxyAgent)
+
+const { statusCode } = await request('https://api.example.com/data')
+console.log(statusCode)
+```
+
+```javascript title="Custom TLS for proxy and target"
+import { ProxyAgent } from 'undici'
+
+const proxyAgent = new ProxyAgent({
+  uri: 'https://secure-proxy.example.com:8443',
+  proxyTls: {
+    // TLS options for connecting to the proxy
+    rejectUnauthorized: true,
+    servername: 'secure-proxy.example.com',
+  },
+  requestTls: {
+    // TLS options for the tunnel to the target origin
+    rejectUnauthorized: true,
+  },
+})
+```
+
+---
+
+## Socks5ProxyAgent
+
+`Socks5ProxyAgent` tunnels HTTP and HTTPS requests through a SOCKS5 proxy. DNS resolution happens on the proxy server (preventing DNS leaks), and HTTPS traffic remains encrypted end-to-end.
+
+### `new Socks5ProxyAgent(proxyUrl, options?)`
+
+<ParamField path="body.proxyUrl" type="string | URL" required>
+  SOCKS5 proxy URL. Must use `socks5://` or `socks://` scheme.
+  Credentials can be embedded in the URL
+  (`socks5://user:pass@host:1080`) or provided via `username`/`password`
+  options.
+</ParamField>
+
+<ParamField path="body.username" type="string">
+  SOCKS5 authentication username. Overrides credentials in the URL.
+</ParamField>
+
+<ParamField path="body.password" type="string">
+  SOCKS5 authentication password. Overrides credentials in the URL.
+</ParamField>
+
+<ParamField path="body.headers" type="IncomingHttpHeaders">
+  Additional headers to include with proxy connections.
+</ParamField>
+
+<ParamField path="body.proxyTls" type="BuildOptions">
+  TLS options for the proxy connection itself (when connecting to a SOCKS5
+  server over TLS).
+</ParamField>
+
+<ParamField path="body.connect" type="Function">
+  Custom connector function for the proxy connection.
+</ParamField>
+
+All [`PoolOptions`](/api/pool) are accepted and forwarded to the underlying pool.
+
+### Code examples
+
+```javascript title="Basic SOCKS5 proxy"
+import { Socks5ProxyAgent, request } from 'undici'
+
+const socks5 = new Socks5ProxyAgent('socks5://localhost:1080')
+
+const { statusCode, body } = await request('https://api.example.com/data', {
+  dispatcher: socks5,
+})
+console.log(await body.json())
+```
+
+```javascript title="SOCKS5 with authentication"
+import { Socks5ProxyAgent, setGlobalDispatcher } from 'undici'
+
+// Credentials in the URL
+const socks5 = new Socks5ProxyAgent('socks5://alice:secret@proxy.example.com:1080')
+
+// Or via options
+// const socks5 = new Socks5ProxyAgent('socks5://proxy.example.com:1080', {
+//   username: 'alice',
+//   password: 'secret',
+// })
+
+setGlobalDispatcher(socks5)
+```
+
+```javascript title="Connection pooling through a SOCKS5 tunnel"
+import { Socks5ProxyAgent, request } from 'undici'
+
+const socks5 = new Socks5ProxyAgent('socks5://localhost:1080', {
+  connections: 10,
+})
+
+const responses = await Promise.all([
+  request('http://api.example.com/a', { dispatcher: socks5 }),
+  request('http://api.example.com/b', { dispatcher: socks5 }),
+  request('http://api.example.com/c', { dispatcher: socks5 }),
+])
+```
+
+#### Supported SOCKS5 features
+
+- Authentication: no-auth (`0x00`) and username/password per RFC 1929 (`0x02`)
+- Address types: IPv4, domain name (recommended), IPv6
+- Command: CONNECT only (UDP is not supported)
+
+---
+
+## EnvHttpProxyAgent
+
+`EnvHttpProxyAgent` automatically reads proxy configuration from environment variables, making it easy to respect system-wide proxy settings without modifying application code.
+
+| Environment variable | Purpose |
+|---|---|
+| `HTTP_PROXY` / `http_proxy` | Proxy for HTTP requests |
+| `HTTPS_PROXY` / `https_proxy` | Proxy for HTTPS requests |
+| `NO_PROXY` / `no_proxy` | Comma/space-separated hostnames to bypass |
+
+When only `http_proxy` is set, it is used for both HTTP and HTTPS requests. Lowercase variables take precedence over uppercase when both are set. `no_proxy` supports leading wildcards (e.g. `*.internal`). Setting `no_proxy=*` bypasses the proxy for all requests.
+
+### `new EnvHttpProxyAgent(options?)`
+
+<ParamField path="body.httpProxy" type="string">
+  Overrides `HTTP_PROXY`/`http_proxy` from the environment.
+</ParamField>
+
+<ParamField path="body.httpsProxy" type="string">
+  Overrides `HTTPS_PROXY`/`https_proxy` from the environment.
+</ParamField>
+
+<ParamField path="body.noProxy" type="string">
+  Overrides `NO_PROXY`/`no_proxy` from the environment.
+</ParamField>
+
+All [`AgentOptions`](/api/agent) are accepted.
+
+### Code examples
+
+<Tabs>
+  <Tab title="Global dispatcher">
+    ```javascript title="Honour system proxy settings globally"
+    import { EnvHttpProxyAgent, setGlobalDispatcher, fetch } from 'undici'
+
+    // Reads HTTP_PROXY, HTTPS_PROXY, NO_PROXY from environment
+    setGlobalDispatcher(new EnvHttpProxyAgent())
+
+    const response = await fetch('https://api.example.com/data')
+    const data = await response.json()
+    ```
+  </Tab>
+  <Tab title="Per-request">
+    ```javascript title="Per-request environment proxy"
+    import { EnvHttpProxyAgent, request } from 'undici'
+
+    const agent = new EnvHttpProxyAgent()
+
+    const { statusCode, body } = await request('https://api.example.com/data', {
+      dispatcher: agent,
+    })
+    console.log(await body.json())
+    ```
+  </Tab>
+  <Tab title="Override env vars">
+    ```javascript title="Override proxy from env at runtime"
+    import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici'
+
+    setGlobalDispatcher(new EnvHttpProxyAgent({
+      httpProxy: 'http://proxy.corp.example.com:3128',
+      httpsProxy: 'http://proxy.corp.example.com:3128',
+      noProxy: 'localhost,127.0.0.1,.corp.example.com',
+    }))
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  `EnvHttpProxyAgent` is well-suited for CLI tools and services deployed in
+  corporate or cloud environments where proxy configuration is managed at the
+  OS or container level. Override the env vars programmatically in tests using
+  the options instead of mutating `process.env`.
+</Tip>

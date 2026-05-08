@@ -1,21 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "undici",
+  "projectType": "sdk-library",
+  "projectName": "undici",
+  "projectDescription": "A high-performance HTTP/1.1 client written from scratch for Node.js, powering the built-in fetch API since Node.js v18.",
   "theme": "luma",
-  "colors": {
-    "primary": "#339933"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/nodejs/undici"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/nodejs/undici"
-    }
-  },
+  "primaryColor": "#339933",
+  "lightColor": null,
+  "darkColor": null,
   "navigation": {
     "tabs": [
       {
@@ -115,5 +105,67 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "High-performance HTTP/1.1 client with connection pooling and pipelining",
+    "WHATWG-compliant fetch() implementation powering Node.js built-in fetch",
+    "Flexible dispatcher architecture (Client, Pool, Agent, ProxyAgent)",
+    "Built-in interceptors for caching, retries, redirects, and DNS",
+    "Comprehensive mocking support via MockAgent, MockClient, and SnapshotAgent",
+    "WebSocket and EventSource (SSE) client support",
+    "HTTP/2 Cleartext (H2C) support",
+    "SOCKS5 proxy support via Socks5ProxyAgent",
+    "Cookie and MIME type utilities",
+    "Diagnostics channel integration for observability"
+  ],
+  "publicApiSurface": [
+    "request(url, options)",
+    "fetch(input, init)",
+    "stream(url, options, factory)",
+    "pipeline(url, options, handler)",
+    "connect(url, options)",
+    "upgrade(url, options)",
+    "setGlobalDispatcher(dispatcher)",
+    "getGlobalDispatcher()",
+    "setGlobalOrigin(origin)",
+    "getGlobalOrigin()",
+    "install()",
+    "Client",
+    "Pool",
+    "BalancedPool",
+    "RoundRobinPool",
+    "Agent",
+    "ProxyAgent",
+    "Socks5ProxyAgent",
+    "EnvHttpProxyAgent",
+    "RetryAgent",
+    "H2CClient",
+    "Dispatcher",
+    "MockAgent",
+    "MockClient",
+    "MockPool",
+    "SnapshotAgent",
+    "RetryHandler",
+    "RedirectHandler",
+    "DecoratorHandler",
+    "interceptors.cache",
+    "interceptors.retry",
+    "interceptors.redirect",
+    "interceptors.dns",
+    "interceptors.dump",
+    "interceptors.decompress",
+    "interceptors.deduplicate",
+    "cacheStores.MemoryCacheStore",
+    "cacheStores.SqliteCacheStore",
+    "WebSocket",
+    "WebSocketStream",
+    "EventSource",
+    "Headers",
+    "Request",
+    "Response",
+    "FormData",
+    "caches (CacheStorage)",
+    "errors",
+    "buildConnector"
+  ]
 }

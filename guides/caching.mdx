@@ -1,0 +1,288 @@
+---
+title: "HTTP Response Caching with the Cache Interceptor"
+description: "Speed up HTTP requests in undici using the cache interceptor with MemoryCacheStore or SqliteCacheStore, with full Cache-Control and ETag support."
+---
+
+Undici ships a cache interceptor that stores HTTP responses and serves them from local storage on subsequent requests, eliminating unnecessary round-trips. The interceptor is fully RFC 9111-compliant: it respects `Cache-Control` directives, validates stale responses via `ETag` and `Last-Modified`, and implements `stale-while-revalidate` for background refreshes. Two pre-built stores are available — an in-memory store suitable for most applications and a SQLite-backed store for durable, persistent caching across process restarts.
+
+## Enabling the cache interceptor
+
+Attach the cache interceptor to an `Agent` (or any dispatcher) using the `compose` helper:
+
+```javascript title="Cache interceptor with default MemoryCacheStore"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.cache()
+)
+
+// Use the agent for all requests
+const response = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/data',
+  method: 'GET'
+})
+```
+
+Set it globally so that all `request()` and `fetch()` calls benefit from caching:
+
+```javascript title="Global caching via setGlobalDispatcher"
+import { Agent, interceptors, setGlobalDispatcher, request } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.cache({
+    store: new interceptors.cache.MemoryCacheStore({
+      maxSize: 50 * 1024 * 1024, // 50 MB
+      maxCount: 512,
+      maxEntrySize: 1 * 1024 * 1024 // 1 MB per entry
+    })
+  })
+)
+
+setGlobalDispatcher(agent)
+
+// First request — cache miss, fetches from origin
+const { statusCode, body } = await request('https://api.example.com/data')
+
+// Second request — cache hit, served instantly from memory
+const { statusCode: cached } = await request('https://api.example.com/data')
+```
+
+---
+
+## Cache interceptor options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `store` | `CacheStore` | `new MemoryCacheStore()` | The storage backend to use |
+| `methods` | `string[]` | `['GET']` | HTTP methods to cache |
+| `type` | `'shared' \| 'private'` | `'shared'` | Whether this is a shared or private cache |
+| `cacheByDefault` | `number` | `undefined` | Default TTL in seconds for responses without `Cache-Control` |
+| `origins` | `(string \| RegExp)[]` | `undefined` | Allowlist of origins to cache; all others are bypassed |
+
+---
+
+## `MemoryCacheStore`
+
+The default store keeps all cached responses in a JavaScript `Map` in the current process. It is zero-dependency and suitable for applications where cache persistence across restarts is not required.
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `maxSize` | `number` | `104857600` (100 MB) | Maximum total size in bytes of all cached responses |
+| `maxCount` | `number` | `1024` | Maximum number of cached responses |
+| `maxEntrySize` | `number` | `5242880` (5 MB) | Maximum body size in bytes for a single entry; larger bodies are not cached |
+
+```javascript title="Configuring MemoryCacheStore"
+import { MemoryCacheStore } from 'undici'
+
+const store = new MemoryCacheStore({
+  maxSize: 50 * 1024 * 1024,     // 50 MB total
+  maxCount: 512,                  // at most 512 entries
+  maxEntrySize: 1 * 1024 * 1024  // skip bodies larger than 1 MB
+})
+```
+
+When the cache exceeds `maxSize` or `maxCount`, the store evicts approximately half of the oldest entries and emits a `'maxSizeExceeded'` event:
+
+```javascript title="Listening to cache eviction"
+import { MemoryCacheStore } from 'undici'
+
+const store = new MemoryCacheStore({ maxCount: 100 })
+
+store.on('maxSizeExceeded', ({ size, maxSize, count, maxCount }) => {
+  console.warn(`Cache full — evicting entries (size=${size}, count=${count})`)
+})
+```
+
+---
+
+## `SqliteCacheStore`
+
+The SQLite store persists responses to a database file, surviving process restarts. It uses Node.js's built-in `node:sqlite` module, which requires the `--experimental-sqlite` flag on Node.js versions before it becomes stable.
+
+<Warning>
+  `SqliteCacheStore` is only available when `node:sqlite` is present. Run Node.js with `--experimental-sqlite` if you are on a version that still gates it behind a flag.
+</Warning>
+
+```bash title="Running with experimental SQLite"
+node --experimental-sqlite app.js
+```
+
+```javascript title="Configuring SqliteCacheStore"
+import { Agent, interceptors, SqliteCacheStore, setGlobalDispatcher } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.cache({
+    store: new SqliteCacheStore({
+      location: './cache.db', // omit for in-memory SQLite
+      maxCount: 10000,
+      maxEntrySize: 2 * 1024 * 1024 // 2 MB
+    })
+  })
+)
+
+setGlobalDispatcher(agent)
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `location` | `string` | `':memory:'` | Path to the SQLite database file |
+| `maxCount` | `number` | `Infinity` | Maximum number of entries |
+| `maxEntrySize` | `number` | `Infinity` | Maximum body size in bytes per entry |
+
+---
+
+## When to use memory vs SQLite
+
+<CardGroup cols={2}>
+  <Card title="MemoryCacheStore" icon="memory">
+    Best for **ephemeral caching** in short-lived processes, CI environments, or when you want zero dependencies and maximum speed. Cache is lost when the process exits.
+  </Card>
+  <Card title="SqliteCacheStore" icon="database">
+    Best for **long-running servers** that benefit from warm caches across restarts, or for **CLI tools** that make repeated requests to the same endpoints.
+  </Card>
+</CardGroup>
+
+---
+
+## Cache-Control header support
+
+The interceptor fully respects `Cache-Control` directives on both requests and responses.
+
+### Response directives
+
+| Directive | Behaviour |
+|-----------|-----------|
+| `max-age=N` | Cache the response for `N` seconds |
+| `no-cache` | Always revalidate before serving the cached response |
+| `no-store` | Never cache this response |
+| `stale-while-revalidate=N` | Serve stale response immediately and revalidate in the background within `N` seconds of becoming stale |
+| `stale-if-error=N` | Serve a stale response if the origin returns an error, within `N` seconds of becoming stale |
+
+### Request directives
+
+| Directive | Behaviour |
+|-----------|-----------|
+| `no-cache` | Force revalidation regardless of freshness |
+| `no-store` | Bypass cache entirely for this request |
+| `max-age=N` | Refuse responses older than `N` seconds |
+| `max-stale=N` | Accept stale responses up to `N` seconds past expiry |
+| `min-fresh=N` | Only accept responses with at least `N` seconds of freshness remaining |
+| `only-if-cached` | Only return a cached response; return `504 Gateway Timeout` if none exists |
+
+---
+
+## ETag and Last-Modified validation
+
+When a cached response becomes stale, the interceptor automatically sends a conditional request to revalidate it:
+
+- **ETag**: adds an `If-None-Match` header with the stored `ETag` value
+- **Last-Modified**: adds an `If-Modified-Since` header with the cached date
+
+If the origin responds with `304 Not Modified`, the cached entry is refreshed in-place without transferring the body again.
+
+```javascript title="Server response that triggers revalidation"
+// Server sets these headers; undici caches and later revalidates
+HTTP/1.1 200 OK
+Cache-Control: max-age=60
+ETag: "abc123"
+Last-Modified: Mon, 01 Jan 2024 00:00:00 GMT
+```
+
+---
+
+## Configuring which methods to cache
+
+By default only `GET` requests are cached. To also cache `HEAD` requests:
+
+```javascript title="Caching GET and HEAD"
+import { Agent, interceptors, setGlobalDispatcher } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.cache({ methods: ['GET', 'HEAD'] })
+)
+
+setGlobalDispatcher(agent)
+```
+
+<Note>
+  Only safe HTTP methods (those without side effects) should be cached. Do not add `POST`, `PUT`, `PATCH`, or `DELETE` to the `methods` array.
+</Note>
+
+---
+
+## Restricting caching to specific origins
+
+Use the `origins` option to limit caching to a set of trusted origins:
+
+```javascript title="Origin allowlist"
+import { Agent, interceptors, setGlobalDispatcher } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.cache({
+    origins: [
+      'https://api.example.com',
+      /^https:\/\/cdn\./  // RegExp allowed
+    ]
+  })
+)
+
+setGlobalDispatcher(agent)
+```
+
+Requests to any origin not in the list are forwarded to the network without caching.
+
+---
+
+## Caching responses without `Cache-Control`
+
+Some APIs do not set `Cache-Control`. Use `cacheByDefault` to assign a default TTL in seconds for these responses:
+
+```javascript title="Default TTL for uncacheable responses"
+import { Agent, interceptors, setGlobalDispatcher } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.cache({
+    cacheByDefault: 300 // cache for 5 minutes if no Cache-Control
+  })
+)
+
+setGlobalDispatcher(agent)
+```
+
+---
+
+## Writing a custom cache store
+
+Implement the `CacheStore` interface if you need a different backend (Redis, Memcached, etc.):
+
+```javascript title="Custom cache store interface"
+class RedisCacheStore {
+  // Optional: return true when the store is full
+  isFull () {
+    return false
+  }
+
+  // Return cached value or undefined
+  async get (key) {
+    const raw = await redis.get(buildKey(key))
+    return raw ? JSON.parse(raw) : undefined
+  }
+
+  // Return a Writable stream to store the response body
+  createWriteStream (key, value) {
+    // Write value + streamed body to Redis
+    // Return a Writable or undefined if full
+  }
+}
+```
+
+Pass the store to the cache interceptor just like the built-in stores:
+
+```javascript
+const agent = new Agent().compose(
+  interceptors.cache({ store: new RedisCacheStore() })
+)
+```

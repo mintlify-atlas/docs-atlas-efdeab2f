@@ -1,0 +1,549 @@
+---
+title: 'HTTP Dispatch Functions: request, stream, pipeline'
+description: 'Top-level convenience functions for making HTTP requests with undici: request, stream, pipeline, connect, and upgrade with full option references.'
+keywords: ['undici', 'request', 'stream', 'pipeline', 'connect', 'upgrade', 'http', 'node.js']
+---
+
+Undici exposes a set of top-level dispatch functions that use the global dispatcher under the hood. Each function accepts a URL as the first argument and an options object, so you don't need to instantiate a `Client` or `Pool` manually. The global dispatcher is an `Agent` instance by default, but you can replace it with [`setGlobalDispatcher`](/api/globals).
+
+<Note>
+All response bodies returned by `request` **must** be fully consumed or explicitly destroyed. Failing to do so will exhaust the connection pool and stall subsequent requests.
+</Note>
+
+---
+
+## `undici.request(url, options)`
+
+Performs an HTTP request and returns a promise that resolves with the full response. Non-idempotent requests are not pipelined; idempotent requests are automatically retried on indirect pipeline failures (except when the request body is a stream).
+
+<CodeGroup>
+
+```javascript ESM
+import { request } from 'undici'
+
+const { statusCode, headers, body } = await request('https://example.com/api/data')
+console.log(statusCode) // 200
+const json = await body.json()
+```
+
+```javascript CJS
+const { request } = require('undici')
+
+const { statusCode, headers, body } = await request('https://example.com/api/data')
+console.log(statusCode) // 200
+const json = await body.json()
+```
+
+</CodeGroup>
+
+### Parameters
+
+<ParamField path="url" type="string | URL | UrlObject" required>
+  The request URL. Accepts a plain string, a WHATWG `URL` object, or a Node.js
+  `UrlObject` (the shape returned by `url.parse()`). When an `UrlObject` is
+  used, `origin` is derived from `protocol`, `auth`, `hostname`, and `port`;
+  `path` is derived from `pathname` and `search`.
+
+  <Expandable title="UrlObject shape">
+    <ResponseField name="protocol" type="string">
+      URL protocol, e.g. `'https:'`.
+    </ResponseField>
+    <ResponseField name="hostname" type="string">
+      Hostname without port.
+    </ResponseField>
+    <ResponseField name="port" type="string | number">
+      Optional port number.
+    </ResponseField>
+    <ResponseField name="auth" type="string">
+      Optional `user:password` for Basic auth.
+    </ResponseField>
+    <ResponseField name="pathname" type="string">
+      Path portion of the URL, e.g. `'/api/data'`.
+    </ResponseField>
+    <ResponseField name="search" type="string">
+      Query string including the leading `?`.
+    </ResponseField>
+    <ResponseField name="path" type="string">
+      Shorthand combining `pathname + search`.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="options" type="object">
+  Request configuration. All fields are optional unless noted.
+
+  <Expandable title="RequestOptions">
+    <ParamField path="options.method" type="string" default="GET">
+      HTTP method. Defaults to `GET`, or `PUT` when a `body` is provided. Must
+      not be `'CONNECT'`.
+    </ParamField>
+    <ParamField path="options.body" type="string | Buffer | Uint8Array | Readable | Iterable | AsyncIterable | null" default="null">
+      Request body. Stream bodies disable automatic retry for idempotent requests.
+    </ParamField>
+    <ParamField path="options.headers" type="object | string[] | Iterable" default="null">
+      Request headers. Accepts a plain object, a flat `[name, value, ...]`
+      string array, or any iterable that yields `[name, value]` pairs (e.g.
+      `Headers`, `Map`). All header names are lower-cased.
+    </ParamField>
+    <ParamField path="options.query" type="Record<string, any> | null" default="null">
+      Query string parameters appended to the URL. Both keys and values are
+      encoded with `encodeURIComponent`. Pass query strings directly in the URL
+      path if you need unencoded characters.
+    </ParamField>
+    <ParamField path="options.dispatcher" type="Dispatcher">
+      Override the dispatcher used for this request. Defaults to the global
+      dispatcher (an `Agent` instance).
+    </ParamField>
+    <ParamField path="options.signal" type="AbortSignal | EventEmitter | null" default="null">
+      Abort signal. Accepts a WHATWG `AbortSignal` or any `EventEmitter` that
+      emits an `'abort'` event. Destroying the request or response body has the
+      same effect.
+    </ParamField>
+    <ParamField path="options.bodyTimeout" type="number | null" default="300000">
+      Milliseconds to wait between receiving body chunks before timing out. Set
+      to `0` to disable. Defaults to 300 seconds.
+    </ParamField>
+    <ParamField path="options.headersTimeout" type="number | null" default="300000">
+      Milliseconds the parser waits to receive complete response headers before
+      timing out. Defaults to 300 seconds.
+    </ParamField>
+    <ParamField path="options.throwOnError" type="boolean" default="false">
+      When `true`, throws a `ResponseStatusCodeError` for `4xx`/`5xx` responses
+      instead of resolving normally.
+    </ParamField>
+    <ParamField path="options.opaque" type="unknown" default="null">
+      Arbitrary value passed through to `ResponseData.opaque`. Useful for
+      avoiding closures in factory functions (see `stream`).
+    </ParamField>
+    <ParamField path="options.reset" type="boolean" default="false">
+      When `true`, closes the connection after the response by sending
+      `connection: close`. When `false`, sends `connection: keep-alive`.
+    </ParamField>
+    <ParamField path="options.blocking" type="boolean" default="true for non-HEAD requests">
+      When `true`, no further pipelining occurs on the same connection until
+      response headers have been received.
+    </ParamField>
+    <ParamField path="options.upgrade" type="string | null" default="null">
+      Initiate a protocol upgrade (e.g. `'Websocket'`). Prefer `undici.upgrade()` for this.
+    </ParamField>
+    <ParamField path="options.onInfo" type="(info: { statusCode: number, headers: object }) => void | null" default="null">
+      Callback invoked for each HTTP `1xx` informational response received
+      before the final response.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Return value
+
+Returns `Promise<ResponseData>`.
+
+<ResponseField name="statusCode" type="number" required>
+  HTTP response status code.
+</ResponseField>
+
+<ResponseField name="statusText" type="string" required>
+  HTTP status message, e.g. `'OK'` or `'Not Found'`.
+</ResponseField>
+
+<ResponseField name="headers" type="Record<string, string | string[]>" required>
+  Response headers. All keys are lower-cased, e.g. `'content-type'`. Header
+  values are strings; headers that appear more than once become string arrays.
+</ResponseField>
+
+<ResponseField name="body" type="stream.Readable" required>
+  Response body as a Node.js `Readable`. Also implements the
+  [Fetch body mixin](https://fetch.spec.whatwg.org/#body-mixin):
+
+  <Expandable title="body methods">
+    <ResponseField name="body.json()" type="Promise<unknown>">
+      Deserializes the body as JSON. Throws if status is `204` or
+      `content-type` is not `application/json`.
+    </ResponseField>
+    <ResponseField name="body.text()" type="Promise<string>">
+      Reads the body and returns it as a UTF-8 string.
+    </ResponseField>
+    <ResponseField name="body.arrayBuffer()" type="Promise<ArrayBuffer>">
+      Reads the body into an `ArrayBuffer`.
+    </ResponseField>
+    <ResponseField name="body.blob()" type="Promise<Blob>">
+      Reads the body and wraps it in a `Blob`.
+    </ResponseField>
+    <ResponseField name="body.bytes()" type="Promise<Uint8Array>">
+      Reads the body and returns raw bytes as a `Uint8Array`.
+    </ResponseField>
+    <ResponseField name="body.dump(options?)" type="Promise<void>">
+      Drains the body without killing the socket. Accepts `{ limit: number }`
+      (default `131072` bytes). Use this to discard unwanted bodies.
+    </ResponseField>
+  </Expandable>
+
+  The body **cannot** be consumed twice. Calling `json()` after `text()` throws
+  a `TypeError`.
+</ResponseField>
+
+<ResponseField name="trailers" type="Record<string, string>" required>
+  Starts as an empty object and is populated with HTTP trailers after the body
+  `'end'` event fires.
+</ResponseField>
+
+<ResponseField name="opaque" type="unknown">
+  The value passed in via `options.opaque`.
+</ResponseField>
+
+<ResponseField name="context" type="object">
+  Internal dispatcher context forwarded from the connection.
+</ResponseField>
+
+### Examples
+
+<Tabs>
+  <Tab title="GET with JSON">
+    ```javascript GET with JSON body
+    import { request } from 'undici'
+
+    const { statusCode, body } = await request('https://api.example.com/users')
+    if (statusCode === 200) {
+      const users = await body.json()
+      console.log(users)
+    } else {
+      await body.dump() // must still consume the body
+    }
+    ```
+  </Tab>
+  <Tab title="POST with JSON">
+    ```javascript POST with JSON body
+    import { request } from 'undici'
+
+    const { statusCode, body } = await request('https://api.example.com/users', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Alice' })
+    })
+
+    await body.dump()
+    console.log('Created:', statusCode) // 201
+    ```
+  </Tab>
+  <Tab title="Abort">
+    ```javascript Aborting a request
+    import { request } from 'undici'
+
+    const controller = new AbortController()
+
+    try {
+      const { body } = await request('https://example.com', {
+        signal: controller.signal
+      })
+      await body.text()
+    } catch (err) {
+      console.error(err) // RequestAbortedError
+    }
+
+    controller.abort()
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+Always consume or destroy the body, even when you don't need its content. Use
+`body.dump()` to drain it without closing the socket, or `body.destroy()` to
+close the socket immediately.
+</Warning>
+
+---
+
+## `undici.stream(url, options, factory)`
+
+A faster alternative to `request` that writes the response body directly into a
+`Writable` stream returned by the `factory` function. This avoids creating an
+intermediate `Readable` and is well-suited for proxying responses (e.g. into a
+Fastify or Express response object).
+
+```javascript Basic stream example
+import { stream } from 'undici'
+import { Writable } from 'node:stream'
+
+const chunks = []
+
+await stream(
+  'https://example.com/large-file',
+  { method: 'GET', opaque: { chunks } },
+  ({ statusCode, headers, opaque: { chunks } }) => {
+    console.log('Status:', statusCode)
+    return new Writable({
+      write (chunk, _enc, cb) {
+        chunks.push(chunk)
+        cb()
+      }
+    })
+  }
+)
+
+console.log(Buffer.concat(chunks).toString())
+```
+
+### Parameters
+
+<ParamField path="url" type="string | URL | UrlObject" required>
+  Same as `request`. See the [URL parameter](#parameters) description above.
+</ParamField>
+
+<ParamField path="options" type="object" required>
+  Same options as `request`. The `method` field is required for `stream`.
+</ParamField>
+
+<ParamField path="factory" type="(data: StreamFactoryData) => stream.Writable" required>
+  Called once response headers are received. Must return a `stream.Writable`
+  that the response body is piped into.
+
+  <Expandable title="StreamFactoryData">
+    <ResponseField name="statusCode" type="number">
+      HTTP response status code.
+    </ResponseField>
+    <ResponseField name="headers" type="Record<string, string | string[]>">
+      Response headers, all keys lower-cased.
+    </ResponseField>
+    <ResponseField name="opaque" type="unknown">
+      Value passed via `options.opaque`.
+    </ResponseField>
+    <ResponseField name="onInfo" type="function | null">
+      Callback for `1xx` informational headers.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+### Return value
+
+Returns `Promise<StreamData>`.
+
+<ResponseField name="opaque" type="unknown">
+  The value passed via `options.opaque`.
+</ResponseField>
+
+<ResponseField name="trailers" type="Record<string, string>">
+  HTTP trailers received after the body ends.
+</ResponseField>
+
+<ResponseField name="context" type="object">
+  Internal dispatcher context.
+</ResponseField>
+
+<Tip>
+Pass context through `options.opaque` instead of using a closure inside the
+factory. This avoids allocating a new function per request and works well with
+frameworks like [Fastify](https://fastify.dev).
+
+```javascript Proxying to a Fastify response via opaque
+fastify.get('/proxy', (req, reply) => {
+  return client.stream(
+    { path: '/upstream', method: 'GET', opaque: reply },
+    ({ opaque }) => opaque.raw // write directly into Fastify's raw response
+  )
+})
+```
+</Tip>
+
+---
+
+## `undici.pipeline(url, options, handler)`
+
+Designed for use with Node.js [`stream.pipeline`](https://nodejs.org/api/stream.html#streampipelinesource-transforms-destination-options). Returns a `Duplex` stream: writes to it become the request body, and reads from it produce the response body. The `handler` function receives response metadata and must return a `Readable`.
+
+```javascript Pipeline echo example
+import { Readable, Writable, PassThrough, pipeline } from 'node:stream'
+import { pipeline as undiciPipeline } from 'undici'
+
+pipeline(
+  Readable.from(['hello world']),
+  undiciPipeline('https://echo.example.com', { method: 'POST' }, ({ statusCode, body }) => {
+    if (statusCode !== 200) throw new Error(`Unexpected status: ${statusCode}`)
+    return body
+  }),
+  new Writable({
+    write (chunk, _, cb) {
+      process.stdout.write(chunk)
+      cb()
+    }
+  }),
+  (err) => { if (err) console.error(err) }
+)
+```
+
+### Parameters
+
+<ParamField path="url" type="string | URL | UrlObject" required>
+  Same as `request`.
+</ParamField>
+
+<ParamField path="options" type="object" required>
+  Extends `RequestOptions` with one additional field:
+
+  <Expandable title="PipelineOptions">
+    <ParamField path="options.objectMode" type="boolean" default="false">
+      Set to `true` when the handler returns an object-mode stream.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="handler" type="(data: PipelineHandlerData) => stream.Readable" required>
+  Called when headers are received. Must validate the response, throw on error,
+  and return a `Readable` that the caller reads from.
+
+  <Expandable title="PipelineHandlerData">
+    <ResponseField name="statusCode" type="number">
+      HTTP response status code.
+    </ResponseField>
+    <ResponseField name="headers" type="Record<string, string | string[]>">
+      Response headers, all keys lower-cased.
+    </ResponseField>
+    <ResponseField name="opaque" type="unknown">
+      Value from `options.opaque`.
+    </ResponseField>
+    <ResponseField name="body" type="stream.Readable">
+      The raw response body stream. Usually returned directly from the handler,
+      or piped through a transform.
+    </ResponseField>
+    <ResponseField name="context" type="object">
+      Internal dispatcher context.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+### Return value
+
+Returns `stream.Duplex`. The duplex is both the request body writer and the
+response body reader. Wire it up with `stream.pipeline` to propagate errors
+automatically.
+
+---
+
+## `undici.connect(url, options)`
+
+Opens an HTTP `CONNECT` tunnel to the target. Used for proxying, TLS
+passthrough, or any other two-way byte-stream protocol. Returns a raw
+`stream.Duplex` socket.
+
+```javascript CONNECT tunnel
+import { connect } from 'undici'
+
+const { socket } = await connect('http://proxy.example.com', {
+  path: '/tunnel'
+})
+
+socket.write('PING')
+socket.on('data', (data) => console.log(data.toString()))
+socket.end()
+```
+
+### Parameters
+
+<ParamField path="url" type="string | URL | UrlObject" required>
+  URL of the HTTP server that handles `CONNECT`. The `path` in `options` becomes
+  the tunnel target address sent in the `CONNECT` request line.
+</ParamField>
+
+<ParamField path="options" type="object">
+  <Expandable title="ConnectOptions">
+    <ParamField path="options.path" type="string" required>
+      Target address for the `CONNECT` request line, e.g. `'host:port'`.
+    </ParamField>
+    <ParamField path="options.headers" type="object | string[] | Iterable" default="null">
+      Additional request headers.
+    </ParamField>
+    <ParamField path="options.signal" type="AbortSignal | EventEmitter | null" default="null">
+      Abort signal.
+    </ParamField>
+    <ParamField path="options.opaque" type="unknown">
+      Passed through to `ConnectData.opaque`.
+    </ParamField>
+    <ParamField path="options.dispatcher" type="Dispatcher">
+      Override the dispatcher.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Return value
+
+Returns `Promise<ConnectData>`.
+
+<ResponseField name="statusCode" type="number">
+  Should be `200 Connection established` on success.
+</ResponseField>
+
+<ResponseField name="headers" type="Record<string, string | string[]>">
+  Response headers from the proxy.
+</ResponseField>
+
+<ResponseField name="socket" type="stream.Duplex">
+  The raw bidirectional socket to the tunnel target.
+</ResponseField>
+
+<ResponseField name="opaque" type="unknown">
+  Value from `options.opaque`.
+</ResponseField>
+
+---
+
+## `undici.upgrade(url, options)`
+
+Sends an HTTP upgrade request to switch protocols (e.g. WebSocket, HTTP/2
+cleartext). Returns the upgraded raw socket along with the server's `101
+Switching Protocols` headers.
+
+```javascript WebSocket upgrade handshake
+import { upgrade } from 'undici'
+
+const { headers, socket } = await upgrade('http://localhost:3000', {
+  path: '/chat',
+  protocol: 'websocket'
+})
+
+console.log('Upgraded to:', headers.upgrade)
+socket.end()
+```
+
+### Parameters
+
+<ParamField path="url" type="string | URL | UrlObject" required>
+  Base URL of the HTTP server.
+</ParamField>
+
+<ParamField path="options" type="object">
+  <Expandable title="UpgradeOptions">
+    <ParamField path="options.path" type="string" required>
+      Path for the upgrade request.
+    </ParamField>
+    <ParamField path="options.method" type="string" default="GET">
+      HTTP method for the upgrade request.
+    </ParamField>
+    <ParamField path="options.headers" type="object | string[] | Iterable" default="null">
+      Additional request headers.
+    </ParamField>
+    <ParamField path="options.protocol" type="string" default="Websocket">
+      Comma-separated list of upgrade protocols in descending preference order.
+    </ParamField>
+    <ParamField path="options.signal" type="AbortSignal | EventEmitter | null" default="null">
+      Abort signal.
+    </ParamField>
+    <ParamField path="options.dispatcher" type="Dispatcher">
+      Override the dispatcher.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Return value
+
+Returns `Promise<UpgradeData>`.
+
+<ResponseField name="headers" type="http.IncomingHeaders">
+  Response headers including `upgrade` and `connection`.
+</ResponseField>
+
+<ResponseField name="socket" type="stream.Duplex">
+  The raw upgraded socket. The protocol handshake is complete; you can begin
+  the wire protocol immediately.
+</ResponseField>
+
+<ResponseField name="opaque" type="unknown">
+  Value from `options.opaque`.
+</ResponseField>

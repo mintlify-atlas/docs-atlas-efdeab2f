@@ -1,0 +1,229 @@
+---
+title: "TLS Client Certificate Authentication in undici"
+description: "Configure undici Client and Agent with TLS client certificates using the connect option for mutual TLS (mTLS) authentication with cert, key, and ca."
+---
+
+Mutual TLS (mTLS) authentication requires the client to present a certificate alongside the server's certificate verification, allowing both ends of the connection to authenticate each other. Undici supports client certificate authentication through the `connect` option on `Client` and `Agent`. The certificates must be signed by a certificate authority (CA) that the server trusts, and you configure the CA, client certificate, and private key as file paths or PEM strings.
+
+## How client certificate auth works
+
+<Steps>
+  <Step title="Server requests a certificate">
+    The HTTPS server is configured with `requestCert: true`, which instructs it to ask the client for a certificate during the TLS handshake.
+  </Step>
+  <Step title="Client presents its certificate">
+    Undici sends the `cert` and `key` specified in the `connect` option during the TLS handshake.
+  </Step>
+  <Step title="Server validates the certificate">
+    The server checks the client certificate against its configured `ca`. If `rejectUnauthorized: false` is set, the server handles validation errors itself rather than dropping the connection immediately.
+  </Step>
+  <Step title="Request proceeds">
+    If the certificate is valid, the request is processed. The server can inspect `req.client.authorized` (boolean) and `req.client.authorizationError` for details.
+  </Step>
+</Steps>
+
+---
+
+## Configuring a `Client` with a client certificate
+
+Pass a `connect` options object to the `Client` constructor containing the TLS material. The example below shows a complete setup including both a server (for illustration) and the undici `Client`:
+
+```javascript title="Client certificate authentication"
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
+const { createServer } = require('node:https')
+const { Client } = require('undici')
+
+// Server configuration — request and optionally validate the client cert
+const serverOptions = {
+  ca: [
+    readFileSync(join(__dirname, 'client-ca-crt.pem'), 'utf8')
+  ],
+  key:  readFileSync(join(__dirname, 'server-key.pem'), 'utf8'),
+  cert: readFileSync(join(__dirname, 'server-crt.pem'), 'utf8'),
+  requestCert: true,
+  rejectUnauthorized: false // handle invalid certs in application code
+}
+
+const server = createServer(serverOptions, (req, res) => {
+  if (req.client.authorized === true) {
+    console.log('Client certificate is valid')
+  } else {
+    console.error('Invalid client certificate:', req.client.authorizationError)
+  }
+  res.end()
+})
+
+server.listen(0, function () {
+  const tls = {
+    ca: [
+      readFileSync(join(__dirname, 'server-ca-crt.pem'), 'utf8')
+    ],
+    key:  readFileSync(join(__dirname, 'client-key.pem'), 'utf8'),
+    cert: readFileSync(join(__dirname, 'client-crt.pem'), 'utf8'),
+    rejectUnauthorized: false,
+    servername: 'agent1'
+  }
+
+  const client = new Client(`https://localhost:${server.address().port}`, {
+    connect: tls
+  })
+
+  client.request({
+    path: '/',
+    method: 'GET'
+  }, (err, { body }) => {
+    body.on('data', (buf) => {})
+    body.on('end', () => {
+      client.close()
+      server.close()
+    })
+  })
+})
+```
+
+---
+
+## `connect` option reference
+
+The `connect` object passed to `Client` or `Agent` supports all of Node.js's `tls.connect` options. The most commonly used are:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `cert` | `string \| Buffer \| string[]` | Client certificate in PEM format |
+| `key` | `string \| Buffer \| string[]` | Private key for the client certificate |
+| `ca` | `string \| Buffer \| string[]` | CA certificate(s) to trust |
+| `passphrase` | `string` | Passphrase for an encrypted private key |
+| `rejectUnauthorized` | `boolean` | Whether to reject servers with invalid certificates (default `true`) |
+| `servername` | `string` | SNI (Server Name Indication) hostname override |
+| `timeout` | `number` | TLS handshake timeout in milliseconds |
+
+<Warning>
+  Setting `rejectUnauthorized: false` disables server certificate validation. Only use this in development or testing environments — never in production, as it makes the connection vulnerable to man-in-the-middle attacks.
+</Warning>
+
+---
+
+## Using `Agent` for multiple hosts
+
+If your application communicates with multiple servers that all require client certificates, configure an `Agent` instead of a `Client`. The `connect` option on `Agent` applies to every connection it manages.
+
+```javascript title="Agent with client certificate"
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { Agent, setGlobalDispatcher, request } from 'undici'
+
+const agent = new Agent({
+  connect: {
+    ca:   readFileSync(join(import.meta.dirname, 'server-ca-crt.pem'), 'utf8'),
+    cert: readFileSync(join(import.meta.dirname, 'client-crt.pem'), 'utf8'),
+    key:  readFileSync(join(import.meta.dirname, 'client-key.pem'), 'utf8'),
+    rejectUnauthorized: true
+  }
+})
+
+setGlobalDispatcher(agent)
+
+const { statusCode, body } = await request('https://api.example.com/secure')
+console.log('Status:', statusCode)
+for await (const chunk of body) {
+  process.stdout.write(chunk)
+}
+```
+
+---
+
+## Encrypted private keys with a passphrase
+
+If your private key is passphrase-protected, include the `passphrase` option alongside the `key`:
+
+```javascript title="Passphrase-protected private key"
+import { readFileSync } from 'node:fs'
+import { Client } from 'undici'
+
+const client = new Client('https://api.example.com', {
+  connect: {
+    cert:       readFileSync('./client-crt.pem'),
+    key:        readFileSync('./client-key-encrypted.pem'),
+    passphrase: process.env.TLS_KEY_PASSPHRASE,
+    ca:         readFileSync('./ca-crt.pem')
+  }
+})
+```
+
+<Tip>
+  Store the passphrase in an environment variable or a secrets manager rather than hard-coding it in source code.
+</Tip>
+
+---
+
+## Custom TLS with `buildConnector`
+
+For advanced use cases — such as dynamically choosing a certificate based on the target host, or combining client certificates with other custom TLS logic — use `buildConnector` from undici to create a custom connector function and pass it to `connect`:
+
+```javascript title="Custom connector with buildConnector"
+import { buildConnector, Client } from 'undici'
+import { readFileSync } from 'node:fs'
+
+const connector = buildConnector({
+  cert: readFileSync('./client-crt.pem'),
+  key:  readFileSync('./client-key.pem'),
+  ca:   readFileSync('./ca-crt.pem'),
+  rejectUnauthorized: true,
+  timeout: 10000 // 10-second TLS handshake timeout
+})
+
+const client = new Client('https://api.example.com', {
+  connect: connector
+})
+
+const { statusCode, body } = await client.request({
+  path: '/secure-endpoint',
+  method: 'GET'
+})
+```
+
+---
+
+## Self-signed certificates in development
+
+During local development with a self-signed CA, set `rejectUnauthorized: false` and provide your local CA so that undici can still verify the chain (even though it is not trusted by the system):
+
+```javascript title="Development self-signed CA"
+import { readFileSync } from 'node:fs'
+import { Client } from 'undici'
+
+const client = new Client('https://localhost:3443', {
+  connect: {
+    ca:   readFileSync('./dev-ca.pem'),
+    cert: readFileSync('./dev-client-crt.pem'),
+    key:  readFileSync('./dev-client-key.pem'),
+    rejectUnauthorized: false // only for development
+  }
+})
+```
+
+---
+
+## Generating certificates for testing
+
+A typical test setup uses `openssl` to generate a self-signed CA, server certificate, and client certificate. Here is the minimal command sequence:
+
+```bash title="Generating test certificates with openssl"
+# Generate CA key and certificate
+openssl genrsa -out ca-key.pem 2048
+openssl req -new -x509 -key ca-key.pem -out ca-crt.pem -days 365 \
+  -subj "/CN=Test CA"
+
+# Generate server key and certificate signed by CA
+openssl genrsa -out server-key.pem 2048
+openssl req -new -key server-key.pem -out server-csr.pem -subj "/CN=localhost"
+openssl x509 -req -in server-csr.pem -CA ca-crt.pem -CAkey ca-key.pem \
+  -CAcreateserial -out server-crt.pem -days 365
+
+# Generate client key and certificate signed by CA
+openssl genrsa -out client-key.pem 2048
+openssl req -new -key client-key.pem -out client-csr.pem -subj "/CN=client"
+openssl x509 -req -in client-csr.pem -CA ca-crt.pem -CAkey ca-key.pem \
+  -CAcreateserial -out client-crt.pem -days 365
+```

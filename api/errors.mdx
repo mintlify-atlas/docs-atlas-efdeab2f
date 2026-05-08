@@ -1,0 +1,152 @@
+---
+title: "undici Error Classes and Error Codes"
+description: "Reference for all undici error classes and error codes. Use error.code checks (not instanceof) to reliably identify undici errors across module versions."
+---
+
+undici exposes a set of typed error classes accessible via the `errors` export. Each error has a `code` property with a stable string identifier. Use `error.code` checks rather than `instanceof` to reliably identify undici errors — this avoids version mismatch issues when Node.js's bundled undici differs from the installed version.
+
+## Importing
+
+```javascript
+import { errors } from 'undici'
+
+// Recommended: check by error code
+try {
+  const { body } = await request('https://api.example.com/data')
+  await body.json()
+} catch (err) {
+  if (err.code === 'UND_ERR_CONNECT_TIMEOUT') {
+    console.error('Connection timed out')
+  } else if (err.code === 'UND_ERR_HEADERS_TIMEOUT') {
+    console.error('Server did not send headers in time')
+  }
+}
+```
+
+<Warning>
+  Avoid `instanceof errors.UndiciError` checks when using both Node.js built-in fetch (which bundles its own undici) and the installed undici package. The global dispatcher may be from a different undici version. Always check `error.code` instead.
+</Warning>
+
+## Error reference
+
+| Error Class | Code | Description |
+|---|---|---|
+| `UndiciError` | `UND_ERR` | Base class for all undici errors |
+| `ConnectTimeoutError` | `UND_ERR_CONNECT_TIMEOUT` | Socket destroyed due to connect timeout |
+| `HeadersTimeoutError` | `UND_ERR_HEADERS_TIMEOUT` | Socket destroyed due to headers timeout |
+| `HeadersOverflowError` | `UND_ERR_HEADERS_OVERFLOW` | Socket destroyed due to headers exceeding max size |
+| `BodyTimeoutError` | `UND_ERR_BODY_TIMEOUT` | Socket destroyed due to body timeout |
+| `InvalidArgumentError` | `UND_ERR_INVALID_ARG` | An invalid argument was passed |
+| `InvalidReturnValueError` | `UND_ERR_INVALID_RETURN_VALUE` | A callback or factory returned an invalid value |
+| `RequestAbortedError` | `UND_ERR_ABORTED` | The request was aborted via `AbortSignal` |
+| `ClientDestroyedError` | `UND_ERR_DESTROYED` | Attempt to use a destroyed client |
+| `ClientClosedError` | `UND_ERR_CLOSED` | Attempt to use a closed client |
+| `SocketError` | `UND_ERR_SOCKET` | A socket-level error occurred |
+| `NotSupportedError` | `UND_ERR_NOT_SUPPORTED` | Unsupported functionality was used |
+| `RequestContentLengthMismatchError` | `UND_ERR_REQ_CONTENT_LENGTH_MISMATCH` | Request body size doesn't match `Content-Length` header |
+| `ResponseContentLengthMismatchError` | `UND_ERR_RES_CONTENT_LENGTH_MISMATCH` | Response body size doesn't match `Content-Length` header |
+| `InformationalError` | `UND_ERR_INFO` | Expected error with informational reason |
+| `ResponseExceededMaxSizeError` | `UND_ERR_RES_EXCEEDED_MAX_SIZE` | Response body exceeded `maxResponseSize` limit |
+| `SecureProxyConnectionError` | `UND_ERR_PRX_TLS` | TLS connection to a proxy server failed |
+| `MessageSizeExceededError` | `UND_ERR_WS_MESSAGE_SIZE_EXCEEDED` | WebSocket decompressed message exceeded maximum size |
+
+## SocketError
+
+`SocketError` includes a `.socket` property with metadata about the connection:
+
+```typescript
+interface SocketInfo {
+  localAddress?: string
+  localPort?: number
+  remoteAddress?: string
+  remotePort?: number
+  remoteFamily?: string
+  timeout?: number
+  bytesWritten?: number
+  bytesRead?: number
+}
+```
+
+```javascript Handling SocketError
+import { errors, request } from 'undici'
+
+try {
+  await request('https://api.example.com')
+} catch (err) {
+  if (err.code === 'UND_ERR_SOCKET') {
+    console.error('Socket error:', err.message)
+    if (err.socket) {
+      console.error('Remote:', err.socket.remoteAddress, err.socket.remotePort)
+      console.error('Bytes read:', err.socket.bytesRead)
+    }
+  }
+}
+```
+
+<Note>
+  The `.socket` property may be `null` in some error scenarios even when the error code is `UND_ERR_SOCKET`.
+</Note>
+
+## Timeout errors
+
+Configure timeouts on `Client`, `Pool`, or `Agent` to control when these errors are thrown:
+
+```javascript Configuring timeouts
+import { Agent, setGlobalDispatcher } from 'undici'
+
+setGlobalDispatcher(new Agent({
+  connectTimeout: 5_000,   // UND_ERR_CONNECT_TIMEOUT after 5s
+  headersTimeout: 10_000,  // UND_ERR_HEADERS_TIMEOUT after 10s
+  bodyTimeout: 30_000      // UND_ERR_BODY_TIMEOUT after 30s
+}))
+```
+
+## Abort errors
+
+Use `AbortController` to cancel requests, which throws `RequestAbortedError`:
+
+```javascript Aborting requests
+import { request } from 'undici'
+
+const controller = new AbortController()
+
+setTimeout(() => controller.abort(), 5_000)
+
+try {
+  const { body } = await request('https://api.example.com/slow', {
+    signal: controller.signal
+  })
+  await body.json()
+} catch (err) {
+  if (err.code === 'UND_ERR_ABORTED') {
+    console.log('Request was aborted')
+  }
+}
+```
+
+## Handling errors comprehensively
+
+```javascript Comprehensive error handling
+import { request, errors } from 'undici'
+
+async function fetchWithHandling(url) {
+  try {
+    const { statusCode, body } = await request(url)
+    const data = await body.json()
+    return { statusCode, data }
+  } catch (err) {
+    switch (err.code) {
+      case 'UND_ERR_CONNECT_TIMEOUT':
+        throw new Error(`Could not connect to ${url}: timeout`)
+      case 'UND_ERR_HEADERS_TIMEOUT':
+        throw new Error(`Server at ${url} did not respond in time`)
+      case 'UND_ERR_ABORTED':
+        throw new Error('Request cancelled')
+      case 'UND_ERR_SOCKET':
+        throw new Error(`Network error: ${err.message}`)
+      default:
+        throw err
+    }
+  }
+}
+```

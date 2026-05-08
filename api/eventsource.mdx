@@ -1,0 +1,136 @@
+---
+title: "EventSource: Server-Sent Events API"
+description: "undici EventSource implements the WHATWG SSE API for Node.js with custom dispatcher support for authentication, proxying, and TLS configuration."
+---
+
+undici exports an `EventSource` class that implements the [WHATWG EventSource API](https://developer.mozilla.org/en-US/docs/Web/API/EventSource) for receiving server-sent events (SSE) in Node.js. It supports custom dispatchers, making it possible to add authentication headers, route through proxies, or configure TLS — capabilities not available in browser `EventSource`.
+
+<Warning>
+  The `EventSource` implementation is experimental and may change in future versions.
+</Warning>
+
+## Constructor
+
+```javascript
+new EventSource(url[, options])
+```
+
+<ParamField path="url" type="string | URL" required>
+  The URL of the SSE endpoint. Must be HTTP or HTTPS.
+</ParamField>
+
+<ParamField path="options" type="EventSourceInit">
+  Optional configuration object.
+  <Expandable title="EventSourceInit properties">
+    <ParamField path="dispatcher" type="Dispatcher">
+      A custom undici dispatcher (e.g. `Agent`, `ProxyAgent`) to use for the connection.
+    </ParamField>
+    <ParamField path="withCredentials" type="boolean">
+      Whether to include credentials. Default: `false`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Basic usage
+
+```javascript Receiving server-sent events
+import { EventSource } from 'undici'
+
+const eventSource = new EventSource('http://localhost:3000/events')
+
+eventSource.onmessage = (event) => {
+  console.log('Message:', event.data)
+}
+
+eventSource.addEventListener('update', (event) => {
+  console.log('Update event:', event.data)
+})
+
+eventSource.onerror = (event) => {
+  console.error('EventSource error:', event)
+}
+```
+
+## Using a custom dispatcher
+
+Pass a custom dispatcher to add headers, use a proxy, or configure TLS:
+
+```javascript Custom headers via dispatcher
+import { EventSource, Agent } from 'undici'
+
+class AuthenticatedAgent extends Agent {
+  dispatch(opts, handler) {
+    opts.headers = {
+      ...opts.headers,
+      'authorization': 'Bearer my-token',
+      'x-custom-header': 'value'
+    }
+    return super.dispatch(opts, handler)
+  }
+}
+
+const eventSource = new EventSource('http://localhost:3000/events', {
+  dispatcher: new AuthenticatedAgent()
+})
+
+eventSource.onmessage = (event) => {
+  console.log(event.data)
+}
+```
+
+## Properties
+
+<ResponseField name="readyState" type="number">
+  Current connection state: `0` (CONNECTING), `1` (OPEN), or `2` (CLOSED).
+</ResponseField>
+
+<ResponseField name="url" type="string">
+  The URL of the event source.
+</ResponseField>
+
+<ResponseField name="withCredentials" type="boolean">
+  Whether the connection was created with credentials.
+</ResponseField>
+
+## Event handlers
+
+| Handler | Fires when |
+|---------|-----------|
+| `onopen` | Connection is established |
+| `onmessage` | A message event with no `event` field is received |
+| `onerror` | An error occurs or the connection is lost |
+
+Named events use `addEventListener`:
+
+```javascript
+eventSource.addEventListener('ping', (event) => {
+  console.log('Ping received:', event.data)
+  console.log('Event ID:', event.lastEventId)
+})
+```
+
+## Closing the connection
+
+```javascript
+eventSource.close()
+```
+
+The connection is permanently closed and will not reconnect.
+
+## SSE message format
+
+The server must respond with `Content-Type: text/event-stream`. Each message follows the SSE format:
+
+```
+data: Hello, world!\n\n
+
+event: update
+data: {"count": 42}\n\n
+
+id: 123
+data: Message with ID\n\n
+```
+
+<Note>
+  For more details on the EventSource API, see [MDN EventSource](https://developer.mozilla.org/en-US/docs/Web/API/EventSource).
+</Note>

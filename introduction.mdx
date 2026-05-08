@@ -1,0 +1,120 @@
+---
+title: "Introduction to undici"
+description: "undici is an HTTP/1.1 client written from scratch for Node.js. Learn what it is, how it relates to Node.js built-in fetch, and what it can do."
+keywords: ["undici", "http client", "node.js", "fetch", "http/1.1", "websocket"]
+---
+
+undici is an HTTP/1.1 client written from scratch for Node.js. Its name comes from the Italian word for eleven — a nod to HTTP/1.1 (1.1 → 11 → undici), and a hat tip to the _Stranger Things_ character. Since Node.js v18, undici powers the built-in `fetch()` implementation, but installing it as a standalone package unlocks a much richer API surface and the latest performance improvements.
+
+## What undici provides
+
+undici ships two layers of HTTP functionality: a standards-compliant Fetch API and a set of lower-level, higher-performance APIs that give you direct control over connections, streaming, and request dispatching.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install undici and make your first request in minutes
+  </Card>
+  <Card title="undici vs. built-in fetch" icon="scale-balanced" href="/undici-vs-fetch">
+    Understand when to install undici vs. rely on Node.js globals
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/request">
+    Full reference for request, fetch, dispatchers, and more
+  </Card>
+  <Card title="Guides" icon="book-open" href="/guides/proxy">
+    Proxy setup, mocking, caching, WebSocket, and testing
+  </Card>
+</CardGroup>
+
+## Core capabilities
+
+### HTTP request APIs
+
+undici exposes several ways to make HTTP requests, each with a different performance and ergonomics trade-off:
+
+- **`request()`** — the primary API. Returns a promise with `statusCode`, `headers`, and a `body` readable with `.json()`, `.text()`, or `.arrayBuffer()`. Fastest option for most workloads.
+- **`stream()`** — pipes the response body into a writable stream you provide. Useful for large downloads.
+- **`pipeline()`** — returns a Node.js `Duplex` stream, letting you pipe a request body in and a response body out.
+- **`fetch()`** — a fully spec-compliant Fetch API implementation, compatible with browser code.
+
+### Dispatchers and connection pooling
+
+All requests flow through a _dispatcher_. The default dispatcher is a global `Agent` that manages connection pooling automatically. You can replace it or configure it directly:
+
+- **`Client`** — a single connection to one origin.
+- **`Pool`** — multiple connections to one origin.
+- **`BalancedPool`** — distributes requests across multiple origins.
+- **`Agent`** — manages pools across multiple origins (the default global dispatcher).
+- **`ProxyAgent`** — routes requests through an HTTP or HTTPS proxy.
+- **`Socks5ProxyAgent`** — routes requests through a SOCKS5 proxy.
+- **`EnvHttpProxyAgent`** — reads proxy configuration from environment variables.
+- **`RetryAgent`** — wraps any dispatcher and adds automatic retries.
+
+### Interceptors
+
+Interceptors compose on top of any dispatcher to add cross-cutting behavior without touching your request code:
+
+- `cache` — HTTP caching with in-memory or SQLite storage
+- `retry` — automatic retries with configurable backoff
+- `redirect` — follow or block redirects
+- `dns` — custom DNS resolution
+- `decompress` — response decompression
+- `deduplicate` — collapse concurrent identical requests
+
+### Web APIs
+
+undici implements several browser-standard Web APIs for use in Node.js:
+
+- **`fetch`**, **`Request`**, **`Response`**, **`Headers`**, **`FormData`** — the Fetch API
+- **`WebSocket`** — a standards-compliant WebSocket client
+- **`EventSource`** — server-sent events
+- **`CacheStorage`** — the Cache API
+- Cookie utilities: `getCookies`, `setCookie`, `deleteCookie`, `getSetCookies`
+
+### Mocking and testing
+
+- **`MockAgent`** — intercepts all HTTP traffic globally for tests
+- **`MockClient`** / **`MockPool`** — intercept traffic for a specific origin
+- **`SnapshotAgent`** — record and replay real HTTP responses
+
+## The name
+
+> _Undici means eleven in Italian. 1.1 → 11 → Eleven → Undici._
+
+It is also a Stranger Things reference.
+
+## Performance
+
+undici is built for speed. The following benchmark was run with 50 TCP connections and a pipelining depth of 10 on Node.js 22.11.0:
+
+| Client | Requests/sec | vs. slowest |
+|---|---|---|
+| axios | 5,708 | baseline |
+| http (no keepalive) | 5,809 | +1.78% |
+| request | 5,828 | +2.11% |
+| undici fetch | 5,903 | +3.43% |
+| node-fetch | 5,945 | +4.15% |
+| got | 6,511 | +14.07% |
+| http (keepalive) | 9,193 | +61.05% |
+| superagent | 9,339 | +63.61% |
+| undici pipeline | 13,364 | +134.13% |
+| undici stream | 18,245 | +219.63% |
+| **undici request** | **18,340** | **+221.29%** |
+| undici dispatch | 22,234 | +289.51% |
+
+<Note>
+  `undici.request()` is over 3x faster than axios and node-fetch. The low-level `dispatch()` API is the fastest of all at 22,234 req/sec.
+</Note>
+
+## Node.js version requirements
+
+undici v8.x requires **Node.js ≥ 22.19.0**. The following table shows the full compatibility matrix:
+
+| undici version | Bundled in Node.js | Node.js versions supported | End of life |
+|---|---|---|---|
+| 5.x | 18.x | ≥14.0 | 2024-04-30 |
+| 6.x | 20.x, 22.x | ≥18.17 | 2026-04-30 |
+| 7.x | 24.x | ≥20.18.1 | 2027-04-30 |
+
+<Tip>
+  You can check which version of undici is bundled with your current Node.js runtime by running `console.log(process.versions.undici)`.
+</Tip>

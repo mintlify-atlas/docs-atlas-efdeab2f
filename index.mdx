@@ -1,133 +1,114 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "undici: High-Performance HTTP Client for Node.js"
+description: "undici is a high-performance HTTP/1.1 client for Node.js with connection pooling, pipelining, fetch, WebSocket, mocking, and interceptors."
 ---
 
-## Setting up
+undici is a high-performance HTTP/1.1 client built specifically for Node.js. It powers the native `fetch()` implementation in Node.js v18+ and provides advanced APIs for connection pooling, pipelining, proxying, mocking, and more — giving you full control over your HTTP stack.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running with your first HTTP request in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="undici vs. fetch" icon="scale-balanced" href="/undici-vs-fetch">
+    Understand when to use the undici module vs. Node.js built-in fetch
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="API Reference" icon="code" href="/api/request">
+    Explore all public APIs: request, fetch, dispatchers, and more
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Guides" icon="book-open" href="/guides/proxy">
+    Proxy setup, mocking, caching, WebSocket, and testing guides
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why undici?
 
-Everything you need to create world-class documentation.
+undici delivers exceptional HTTP performance through a purpose-built architecture that eliminates the overhead of Node.js's built-in `http` module. Benchmarks show `undici.request()` achieving over 18,000 req/sec — more than 3x faster than alternatives like `axios` or `request`.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Connection Pooling" icon="layer-group" href="/concepts/connection-pooling">
+    Efficient persistent connections with configurable pool sizes
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="HTTP Pipelining" icon="arrows-split-up-and-left" href="/concepts/dispatchers">
+    Send multiple requests over a single connection for maximum throughput
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Interceptors" icon="filter" href="/concepts/interceptors">
+    Compose caching, retry, redirect, and DNS interceptors declaratively
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Proxy Support" icon="server" href="/guides/proxy">
+    HTTP, HTTPS, SOCKS5, and environment-based proxy configuration
   </Card>
-</Columns>
+  <Card title="Mocking" icon="flask" href="/guides/mocking">
+    Intercept and mock HTTP requests for testing without real servers
+  </Card>
+  <Card title="Web APIs" icon="globe" href="/api/websocket">
+    WebSocket, EventSource, CacheStorage, and Cookies support
+  </Card>
+</CardGroup>
 
-## Make your content agent ready
+## Get started
 
-Make your docs work for humans and AI agents alike.
+<Steps>
+  <Step title="Install undici">
+    Add undici to your Node.js project:
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+    ```bash
+    npm install undici
+    ```
+  </Step>
+  <Step title="Make your first request">
+    Use the `request` API for maximum performance:
 
-## Need inspiration?
+    ```javascript
+    import { request } from 'undici'
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    const { statusCode, headers, body } = await request('https://api.example.com/data')
+    const data = await body.json()
+    console.log(statusCode, data)
+    ```
+  </Step>
+  <Step title="Configure a dispatcher">
+    Use an `Agent` for connection pooling across requests:
+
+    ```javascript
+    import { Agent, setGlobalDispatcher, request } from 'undici'
+
+    const agent = new Agent({ keepAliveTimeout: 10_000, connections: 10 })
+    setGlobalDispatcher(agent)
+
+    // All subsequent requests share the pooled connections
+    const { body } = await request('https://api.example.com/users')
+    const users = await body.json()
+    ```
+  </Step>
+  <Step title="Explore advanced features">
+    Add interceptors for caching, retries, and more:
+
+    ```javascript
+    import { Agent, interceptors, cacheStores } from 'undici'
+
+    const agent = new Agent().compose(
+      interceptors.cache({
+        store: new cacheStores.MemoryCacheStore()
+      }),
+      interceptors.retry({ maxRetries: 3 })
+    )
+    ```
+  </Step>
+</Steps>
+
+## Performance comparison
+
+undici consistently outperforms other HTTP clients in Node.js benchmarks:
+
+| Client | Requests/sec | vs. slowest |
+|--------|-------------|-------------|
+| axios | 5,708 | baseline |
+| node-fetch | 5,945 | +4% |
+| undici fetch | 5,903 | +3% |
+| undici stream | 18,245 | +220% |
+| **undici request** | **18,340** | **+221%** |
+| undici dispatch | 22,234 | +289% |
+
+<Note>
+  Benchmarks run with 50 TCP connections and pipelining depth of 10 on Node.js 22.11.0. Results will vary by workload.
+</Note>

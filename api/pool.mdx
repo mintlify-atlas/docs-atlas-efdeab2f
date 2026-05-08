@@ -1,0 +1,251 @@
+---
+title: "Pool, BalancedPool, and RoundRobinPool reference"
+description: "API reference for undici Pool, BalancedPool, and RoundRobinPool — multiple connections to one or many origins with round-robin distribution."
+keywords: ["undici", "pool", "balanced pool", "round robin", "connection pooling", "node.js"]
+---
+
+When a single connection is not enough, undici offers three pooling strategies. `Pool` manages multiple connections to a single origin and selects the first available one. `BalancedPool` spreads requests across multiple origins using a round-robin algorithm. `RoundRobinPool` connects to a single origin but cycles through connections evenly — useful when the origin sits behind a load balancer that distributes TCP connections across backend servers.
+
+All pool classes extend `Dispatcher`. Methods (`request`, `stream`, `pipeline`, `dispatch`, `connect`, `upgrade`, `close`, `destroy`) and events (`connect`, `disconnect`, `drain`) are the same as those documented in the [Dispatcher reference](/api/dispatcher).
+
+---
+
+## Pool
+
+`Pool` creates a set of `Client` instances to a single origin and dispatches each incoming request to the first available client.
+
+### `new Pool(url, options?)`
+
+<ParamField path="body.url" type="URL | string" required>
+  The origin URL (protocol, hostname, port only).
+</ParamField>
+
+<ParamField path="body.connections" type="number | null" default="null">
+  Maximum number of `Client` instances. When `null`, the pool creates
+  connections on demand without limit.
+</ParamField>
+
+<ParamField path="body.factory" type="(origin: URL, opts: object) => Dispatcher" default="(origin, opts) => new Client(origin, opts)">
+  Custom factory for creating each connection. Useful when you need to
+  decorate individual clients with interceptors.
+</ParamField>
+
+<ParamField path="body.clientTtl" type="number | null" default="null">
+  Milliseconds before an idle `Client` instance is removed from the pool and
+  closed. When `null`, clients live until the pool is closed.
+</ParamField>
+
+All [`ClientOptions`](/api/client) are also accepted and forwarded to each `Client` instance created by the pool.
+
+```javascript title="Basic Pool usage"
+import { Pool } from 'undici'
+
+const pool = new Pool('https://api.example.com', { connections: 10 })
+
+const { statusCode, body } = await pool.request({
+  path: '/items',
+  method: 'GET',
+})
+
+console.log(await body.json())
+await pool.close()
+```
+
+```javascript title="Pool with a custom client factory"
+import { Pool, Client, interceptors } from 'undici'
+
+const pool = new Pool('https://api.example.com', {
+  connections: 5,
+  factory: (origin, opts) =>
+    new Client(origin, opts).compose(
+      interceptors.retry({ maxRetries: 3 })
+    ),
+})
+```
+
+### Properties
+
+<ResponseField name="pool.closed" type="boolean">
+  `true` after `pool.close()` has been called.
+</ResponseField>
+
+<ResponseField name="pool.destroyed" type="boolean">
+  `true` after `pool.destroy()` has been called or close has completed.
+</ResponseField>
+
+<ResponseField name="pool.stats" type="PoolStats">
+  Aggregate statistics across all clients in the pool.
+
+  <Expandable title="PoolStats fields">
+    <ResponseField name="connected" type="number">
+      Number of open socket connections in this pool.
+    </ResponseField>
+    <ResponseField name="free" type="number">
+      Open connections that have no active request.
+    </ResponseField>
+    <ResponseField name="pending" type="number">
+      Requests waiting to be assigned to a connection.
+    </ResponseField>
+    <ResponseField name="queued" type="number">
+      Requests queued across all clients.
+    </ResponseField>
+    <ResponseField name="running" type="number">
+      Requests currently in-flight across all clients.
+    </ResponseField>
+    <ResponseField name="size" type="number">
+      Total active, pending, and queued requests.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## BalancedPool
+
+`BalancedPool` accepts multiple origin URLs and distributes requests across them in a round-robin fashion. Each origin is backed by a `Pool` instance. You can add and remove origins at runtime.
+
+### `new BalancedPool(upstreams, options?)`
+
+<ParamField path="body.upstreams" type="URL | string | string[]" required>
+  One or more origin URLs (protocol, hostname, port only).
+</ParamField>
+
+<ParamField path="body.factory" type="(origin: URL, opts: object) => Dispatcher" default="(origin, opts) => new Pool(origin, opts)">
+  Custom factory for creating each per-origin `Pool`.
+</ParamField>
+
+All [`PoolOptions`](#pool) are accepted and forwarded to each `Pool` instance.
+
+```javascript title="BalancedPool across multiple origins"
+import { BalancedPool } from 'undici'
+
+const pool = new BalancedPool([
+  'http://backend-1.internal',
+  'http://backend-2.internal',
+  'http://backend-3.internal',
+])
+
+const responses = await Promise.all(
+  Array.from({ length: 9 }, () =>
+    pool.request({ path: '/health', method: 'GET' })
+  )
+)
+
+// Requests are spread evenly: 3 per origin
+await pool.close()
+```
+
+### Methods
+
+In addition to the standard `Dispatcher` methods, `BalancedPool` provides:
+
+**`balancedPool.addUpstream(upstream)`**
+
+Adds a new origin to the pool at runtime.
+
+<ParamField path="body.upstream" type="string" required>
+  Origin URL to add (protocol, hostname, port only).
+</ParamField>
+
+**`balancedPool.removeUpstream(upstream)`**
+
+Removes a previously-added origin. In-flight requests to that origin complete normally.
+
+```javascript title="Dynamic upstream management"
+import { BalancedPool } from 'undici'
+
+const pool = new BalancedPool('http://backend-1.internal')
+
+pool.addUpstream('http://backend-2.internal')
+pool.addUpstream('http://backend-3.internal')
+
+// later, during a rolling deployment:
+pool.removeUpstream('http://backend-1.internal')
+```
+
+### Properties
+
+<ResponseField name="balancedPool.upstreams" type="string[]">
+  Current list of upstream origin URLs.
+</ResponseField>
+
+<ResponseField name="balancedPool.stats" type="PoolStats">
+  Aggregate stats across all origin pools (same structure as `Pool.stats`).
+</ResponseField>
+
+---
+
+## RoundRobinPool
+
+`RoundRobinPool` connects to a single origin but maintains multiple connections and cycles through them in round-robin order. Unlike `Pool` (which picks the first available connection), `RoundRobinPool` distributes requests evenly across all connections. This matters when the single origin hostname is backed by a load balancer that assigns each TCP connection to a different backend server.
+
+### `new RoundRobinPool(url, options?)`
+
+<ParamField path="body.url" type="URL | string" required>
+  The origin URL (protocol, hostname, port only).
+</ParamField>
+
+<ParamField path="body.connections" type="number | null" default="null">
+  Number of `Client` instances to create. When `null`, connections are created
+  on demand.
+</ParamField>
+
+<ParamField path="body.factory" type="(origin: URL, opts: object) => Dispatcher" default="(origin, opts) => new Client(origin, opts)">
+  Custom factory for each connection.
+</ParamField>
+
+<ParamField path="body.clientTtl" type="number | null" default="null">
+  Milliseconds before an idle `Client` is removed and closed.
+</ParamField>
+
+All [`ClientOptions`](/api/client) are also accepted.
+
+```javascript title="RoundRobinPool in a Kubernetes environment"
+import { RoundRobinPool } from 'undici'
+
+// 10 TCP connections, each potentially routed to a different Pod
+const pool = new RoundRobinPool('http://my-service.default.svc.cluster.local', {
+  connections: 10,
+})
+
+const results = await Promise.all(
+  Array.from({ length: 50 }, () =>
+    pool.request({ path: '/api/data', method: 'GET' })
+  )
+)
+
+console.log(results.map(r => r.statusCode))
+await pool.close()
+```
+
+<Warning>
+  `RoundRobinPool` distributes HTTP requests evenly across TCP connections, but
+  whether that translates to even backend distribution depends on how the load
+  balancer assigns connections. It does **not** work when the load balancer uses
+  client IP affinity or sticky sessions. In that case, use `BalancedPool` with
+  individual backend addresses instead.
+</Warning>
+
+### Properties
+
+<ResponseField name="roundRobinPool.stats" type="PoolStats">
+  Aggregate stats across all connections (same structure as `Pool.stats`).
+</ResponseField>
+
+---
+
+## When to use Pool vs Agent
+
+<Tip>
+  Use `Pool` when all requests go to a single origin and you want explicit
+  connection concurrency control. Use `Agent` when your application makes
+  requests to multiple different origins — Agent manages a pool per origin
+  automatically.
+</Tip>
+
+| Scenario | Recommended class |
+|---|---|
+| Single origin, multiple connections | `Pool` |
+| Single origin, round-robin over load balancer | `RoundRobinPool` |
+| Multiple origins, round-robin | `BalancedPool` |
+| Dynamic set of origins | `Agent` |

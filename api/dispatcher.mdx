@@ -1,0 +1,494 @@
+---
+title: "Dispatcher: the undici base class for HTTP"
+description: "Dispatcher is the abstract base class for all undici dispatchers. Covers dispatch(), request(), stream(), compose(), and the handler interface."
+keywords: ["undici", "dispatcher", "http client", "dispatch", "interceptors", "node.js"]
+---
+
+Dispatcher is the abstract base class that every undici transport builds on top of. You never instantiate `Dispatcher` directly — instead you work with concrete implementations like `Client`, `Pool`, or `Agent`. Understanding Dispatcher matters because all methods (`request`, `stream`, `pipeline`, `dispatch`, `connect`, `upgrade`) and all events (`connect`, `disconnect`, `drain`, `connectionError`) are defined here and inherited by every dispatcher in the library.
+
+<Note>
+  Requests are not guaranteed to be dispatched in order of invocation.
+  Non-idempotent requests will not be pipelined, but idempotent requests may be
+  automatically retried if they fail due to head-of-line blocking.
+</Note>
+
+## Methods
+
+### `dispatch(options, handler)`
+
+The low-level API that all higher-level methods delegate to. Use this when you need complete control over the request lifecycle via callbacks. Returns `false` when the dispatcher is busy — wait for the `drain` event before dispatching again.
+
+```javascript title="Basic dispatch example"
+import { Client } from 'undici'
+
+const client = new Client('http://localhost:3000')
+const chunks = []
+
+client.dispatch(
+  { path: '/', method: 'GET' },
+  {
+    onRequestStart: () => console.log('connected'),
+    onResponseStart: (_ctrl, statusCode, headers) => {
+      console.log(statusCode, headers)
+    },
+    onResponseData: (_ctrl, chunk) => chunks.push(chunk),
+    onResponseEnd: (_ctrl, trailers) => {
+      console.log(Buffer.concat(chunks).toString('utf8'))
+    },
+    onResponseError: (_ctrl, err) => console.error(err),
+  }
+)
+```
+
+#### `DispatchOptions`
+
+<ParamField path="body.origin" type="string | URL">
+  The origin to dispatch the request against. Required by `Agent`; inferred
+  from the constructor URL for `Client` and `Pool`.
+</ParamField>
+
+<ParamField path="body.path" type="string" required>
+  The request path, including query string if not using `query`.
+</ParamField>
+
+<ParamField path="body.method" type="string" required>
+  HTTP method (e.g. `'GET'`, `'POST'`, `'PUT'`).
+</ParamField>
+
+<ParamField path="body.body" type="string | Buffer | Uint8Array | stream.Readable | Iterable | AsyncIterable | null" default="null">
+  Request body.
+</ParamField>
+
+<ParamField path="body.headers" type="UndiciHeaders" default="null">
+  Request headers. Can be an object, a flat string array (even-length), or any
+  iterable of `[name, value]` pairs (e.g. `Headers`, `Map`).
+</ParamField>
+
+<ParamField path="body.query" type="Record<string, any> | null" default="null">
+  Query string parameters. Keys and values are encoded with `encodeURIComponent`.
+  For unencoded query strings, embed them directly in `path`.
+</ParamField>
+
+<ParamField path="body.reset" type="boolean" default="false">
+  When `true`, sends `connection: close` and closes the socket after the
+  response. Defaults to keep-alive behavior.
+</ParamField>
+
+<ParamField path="body.idempotent" type="boolean" default="true for GET and HEAD">
+  Whether the request can be safely retried. Non-idempotent requests are not
+  pipelined.
+</ParamField>
+
+<ParamField path="body.blocking" type="boolean" default="true except for HEAD">
+  Prevents further pipelining on the same connection until response headers
+  arrive. Set to `true` for long-running requests.
+</ParamField>
+
+<ParamField path="body.upgrade" type="string | null" default="null">
+  Upgrade token (e.g. `'websocket'`). When set, the handler must implement
+  `onRequestUpgrade`.
+</ParamField>
+
+<ParamField path="body.headersTimeout" type="number | null" default="300000">
+  Milliseconds to wait for complete response headers before timing out.
+  Set to `0` to disable.
+</ParamField>
+
+<ParamField path="body.bodyTimeout" type="number | null" default="300000">
+  Milliseconds of inactivity on body data before timing out.
+  Set to `0` to disable.
+</ParamField>
+
+<ParamField path="body.signal" type="AbortSignal | EventEmitter | null" default="null">
+  Abort signal or an `EventEmitter` that emits `'abort'`.
+</ParamField>
+
+<ParamField path="body.expectContinue" type="boolean" default="false">
+  HTTP/2 only. Appends `expect: 100-continue` and holds the body until the
+  server acknowledges.
+</ParamField>
+
+#### `DispatchHandler`
+
+The handler object passed to `dispatch()`. All methods receive a `DispatchController` as their first argument.
+
+<ResponseField name="onRequestStart" type="(controller, context) => void" required>
+  Called before the request is dispatched. May be called multiple times on
+  retry.
+</ResponseField>
+
+<ResponseField name="onResponseStart" type="(controller, statusCode, headers, statusMessage?) => void" required>
+  Called when the status code and headers are received. May fire multiple times
+  for `1xx` informational responses.
+</ResponseField>
+
+<ResponseField name="onResponseData" type="(controller, chunk: Buffer) => void" required>
+  Called for each chunk of response body data.
+</ResponseField>
+
+<ResponseField name="onResponseEnd" type="(controller, trailers) => void" required>
+  Called when the response is fully received, including trailers.
+</ResponseField>
+
+<ResponseField name="onResponseError" type="(controller, error: Error) => void" required>
+  Called on error. Must not throw.
+</ResponseField>
+
+<ResponseField name="onRequestUpgrade" type="(controller, statusCode, headers, socket) => void">
+  Required when `upgrade` is set or method is `CONNECT`.
+</ResponseField>
+
+#### Controller API
+
+The `DispatchController` passed to every handler method exposes:
+
+- `controller.pause()` — back-pressure signal to pause data flow
+- `controller.resume()` — resume after a `pause()`
+- `controller.abort(reason?)` — abort the request
+- `controller.rawHeaders` — raw response header array
+- `controller.rawTrailers` — raw trailer array
+
+<Note>
+  If you are migrating from the legacy handler API (`onConnect`, `onHeaders`,
+  `onData`, `onComplete`, `onError`), switch to the new callbacks. Use
+  `Dispatcher1Wrapper` to expose a new dispatcher to legacy v1 handler
+  consumers.
+
+  ```javascript title="Legacy compatibility wrapper"
+  import { Agent, Dispatcher1Wrapper } from 'undici'
+
+  const legacyDispatcher = new Dispatcher1Wrapper(new Agent())
+  ```
+</Note>
+
+---
+
+### `request(options[, callback])`
+
+Performs an HTTP request and returns a `ResponseData` object. Idempotent requests are automatically retried on head-of-line failures (unless the body is a stream). All response bodies **must** be consumed or destroyed.
+
+```javascript title="GET request"
+import { Client } from 'undici'
+
+const client = new Client('http://localhost:3000')
+
+const { statusCode, headers, body, trailers } = await client.request({
+  path: '/users/1',
+  method: 'GET',
+})
+
+console.log(statusCode) // 200
+const data = await body.json()
+```
+
+```javascript title="POST with JSON body"
+const { statusCode, body } = await client.request({
+  path: '/users',
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'Alice' }),
+})
+```
+
+```javascript title="Aborting a request"
+const controller = new AbortController()
+
+client.request({
+  path: '/',
+  method: 'GET',
+  signal: controller.signal,
+}).catch(console.error)
+
+controller.abort()
+```
+
+#### `RequestOptions`
+
+Extends `DispatchOptions`. Additional fields:
+
+<ParamField path="body.opaque" type="unknown" default="null">
+  Passed through to `ResponseData` and `StreamFactoryData`. Use to avoid
+  closures in factory functions.
+</ParamField>
+
+<ParamField path="body.onInfo" type="({ statusCode, headers }) => void | null" default="null">
+  Called for each `1xx` informational response before the final response.
+</ParamField>
+
+#### `ResponseData`
+
+<ResponseField name="statusCode" type="number" required>
+  HTTP response status code.
+</ResponseField>
+
+<ResponseField name="statusText" type="string" required>
+  Status message (e.g. `"OK"`, `"Not Found"`).
+</ResponseField>
+
+<ResponseField name="headers" type="Record<string, string | string[]>" required>
+  Response headers. All keys are lower-cased.
+</ResponseField>
+
+<ResponseField name="body" type="stream.Readable" required>
+  Response body stream. Also implements the Fetch body mixin: `.json()`,
+  `.text()`, `.arrayBuffer()`, `.blob()`, `.bytes()`. Cannot be consumed
+  twice. Call `body.dump()` to discard without killing the socket.
+</ResponseField>
+
+<ResponseField name="trailers" type="Record<string, string>">
+  HTTP trailers, populated after `body` emits `'end'`.
+</ResponseField>
+
+<ResponseField name="opaque" type="unknown">
+  The value passed as `options.opaque`.
+</ResponseField>
+
+<Warning>
+  Always fully consume or destroy the response body, even when you don't need
+  it. Leaving it unconsumed will prevent the connection from being reused.
+
+  ```javascript title="Discarding the body safely"
+  const { body, statusCode } = await client.request({ path: '/', method: 'GET' })
+
+  if (statusCode === 200) {
+    return await body.json()
+  }
+
+  await body.dump() // discard up to 128KB without killing the socket
+  ```
+</Warning>
+
+---
+
+### `stream(options, factory[, callback])`
+
+A faster alternative to `request` that writes the response body directly to a `stream.Writable` returned by `factory`. Avoids creating an intermediate `Readable`.
+
+```javascript title="Stream response to a Writable"
+import { Writable } from 'stream'
+import { Client } from 'undici'
+
+const client = new Client('http://localhost:3000')
+const chunks = []
+
+await client.stream(
+  { path: '/', method: 'GET', opaque: { chunks } },
+  ({ statusCode, opaque: { chunks } }) =>
+    new Writable({
+      write(chunk, _, cb) {
+        chunks.push(chunk)
+        cb()
+      },
+    })
+)
+
+console.log(Buffer.concat(chunks).toString('utf8'))
+```
+
+---
+
+### `pipeline(options, handler)`
+
+For use with Node.js `stream.pipeline`. The `handler` receives `{ statusCode, headers, body, opaque }` and must return a `Readable`. Returns a `Duplex` that writes the request body and reads the response.
+
+---
+
+### `connect(options[, callback])`
+
+Opens a raw TCP tunnel using `HTTP CONNECT`. Returns `{ statusCode, headers, socket, opaque }`.
+
+<ParamField path="body.path" type="string" required>
+  Target host and port in the form `host:port`.
+</ParamField>
+
+<ParamField path="body.headers" type="UndiciHeaders" default="null">
+  Additional request headers.
+</ParamField>
+
+<ParamField path="body.signal" type="AbortSignal | EventEmitter | null" default="null">
+  Abort signal.
+</ParamField>
+
+---
+
+### `upgrade(options[, callback])`
+
+Upgrades to a different protocol (e.g. WebSocket). Returns `{ headers, socket, opaque }`.
+
+<ParamField path="body.path" type="string" required>
+  Request path.
+</ParamField>
+
+<ParamField path="body.method" type="string" default="GET">
+  HTTP method.
+</ParamField>
+
+<ParamField path="body.protocol" type="string" default="Websocket">
+  Comma-separated protocol list in descending preference order.
+</ParamField>
+
+<ParamField path="body.headers" type="UndiciHeaders" default="null">
+  Additional request headers.
+</ParamField>
+
+---
+
+### `close([callback])`
+
+Gracefully closes the dispatcher. Waits for in-flight requests to complete before resolving.
+
+```javascript
+await dispatcher.close()
+```
+
+---
+
+### `destroy([error][, callback])`
+
+Abruptly destroys the dispatcher. All pending and running requests are asynchronously aborted with the provided error (or a generic error if omitted).
+
+```javascript
+await dispatcher.destroy(new Error('shutting down'))
+```
+
+---
+
+### `compose(interceptors)`
+
+Wraps the dispatcher with one or more interceptors, returning a new `Dispatcher`. Interceptors are applied in reverse order — the last interceptor in the array is the first to process each request.
+
+```javascript title="Adding redirect and retry interceptors"
+import { Client, interceptors } from 'undici'
+
+const client = new Client('http://api.example.com')
+  .compose(interceptors.redirect({ maxRedirections: 3 }))
+  .compose(interceptors.retry({ maxRetries: 3, minTimeout: 500 }))
+
+await client.request({ path: '/', method: 'GET' })
+```
+
+#### Built-in interceptors
+
+<AccordionGroup>
+  <Accordion title="redirect">
+    Handles HTTP redirects automatically.
+
+    ```javascript
+    const { Client, interceptors } = require('undici')
+
+    const client = new Client('http://api.example.com').compose(
+      interceptors.redirect({ maxRedirections: 5, throwOnMaxRedirect: true })
+    )
+    ```
+  </Accordion>
+
+  <Accordion title="retry">
+    Retries failed requests with exponential backoff. Accepts the same options as `RetryHandler`.
+
+    ```javascript
+    const client = new Client('http://api.example.com').compose(
+      interceptors.retry({ maxRetries: 3, minTimeout: 1000, timeoutFactor: 2 })
+    )
+    ```
+  </Accordion>
+
+  <Accordion title="cache">
+    Client-side HTTP caching per RFC 9111. Accepts a `CacheStore` (default: `MemoryCacheStore`).
+
+    ```javascript
+    import { Agent, cacheStores, interceptors, setGlobalDispatcher } from 'undici'
+
+    setGlobalDispatcher(
+      new Agent().compose(
+        interceptors.cache({
+          store: new cacheStores.MemoryCacheStore({ maxSize: 100 * 1024 * 1024 })
+        })
+      )
+    )
+    ```
+  </Accordion>
+
+  <Accordion title="dns">
+    Caches DNS lookups per origin to reduce resolution overhead.
+
+    Options: `maxTTL` (default `10000` ms), `maxItems`, `dualStack` (default `true`), `affinity` (`4` or `6`), `lookup`, `pick`, `storage`.
+  </Accordion>
+
+  <Accordion title="dump">
+    Dumps (discards) response bodies up to `maxSize` bytes (default 1 MB) without killing the connection.
+  </Accordion>
+
+  <Accordion title="decompress">
+    Automatically decompresses gzip, deflate, brotli, and zstd response bodies per RFC 9110.
+
+    Options: `skipErrorResponses` (default `true`), `skipStatusCodes` (default `[204, 304]`).
+  </Accordion>
+
+  <Accordion title="responseError">
+    Throws a `ResponseError` for any response with a status code >= 400.
+  </Accordion>
+
+  <Accordion title="deduplicate">
+    Deduplicates concurrent identical requests so only one reaches the origin.
+
+    Options: `methods` (default `['GET']`), `skipHeaderNames`, `excludeHeaderNames`, `maxBufferSize`.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Events
+
+<ResponseField name="connect" type="event">
+  Emitted when a socket connects to the origin.
+  Parameters: `origin: URL`, `targets: Dispatcher[]`.
+</ResponseField>
+
+<ResponseField name="disconnect" type="event">
+  Emitted when a socket disconnects. For HTTP/2, also fired on `GOAWAY` frames.
+  Parameters: `origin: URL`, `targets: Dispatcher[]`, `error: Error`.
+</ResponseField>
+
+<ResponseField name="connectionError" type="event">
+  Emitted when the dispatcher fails to connect to the origin.
+  Parameters: `origin: URL`, `targets: Dispatcher[]`, `error: Error`.
+</ResponseField>
+
+<ResponseField name="drain" type="event">
+  Emitted when the dispatcher is no longer busy. Safe to call `dispatch()`
+  again after this event. Parameters: `origin: URL`.
+</ResponseField>
+
+## Header formats (`UndiciHeaders`)
+
+Headers can be passed in three forms:
+
+<Tabs>
+  <Tab title="Object">
+    ```javascript
+    {
+      'content-type': 'application/json',
+      'x-request-id': 'abc123',
+    }
+    ```
+  </Tab>
+  <Tab title="Array">
+    ```javascript
+    // Must have even length — alternating name, value pairs
+    ['content-type', 'application/json', 'x-request-id', 'abc123']
+    ```
+  </Tab>
+  <Tab title="Iterable">
+    ```javascript
+    // Headers, Map, or any iterable of [name, value] pairs
+    new Headers({ 'content-type': 'application/json' })
+    new Map([['content-type', 'application/json']])
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Undici validates header syntax but does not sanitize values. Always validate
+  and sanitize user-provided header names and values before passing them to
+  undici to prevent header injection vulnerabilities.
+</Warning>

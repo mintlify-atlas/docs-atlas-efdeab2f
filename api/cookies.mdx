@@ -1,0 +1,219 @@
+---
+title: "Cookie Utilities: parse, get, set, delete"
+description: "undici exports cookie utility functions for parsing and manipulating HTTP Cookie and Set-Cookie headers, following the WHATWG cookie specification."
+---
+
+undici exports a set of cookie utility functions for working with HTTP `Cookie` and `Set-Cookie` headers. These functions operate directly on undici's `Headers` objects and follow the [WHATWG cookie specification](https://httpwg.org/http-extensions/draft-ietf-httpbis-rfc6265bis.html).
+
+## Importing
+
+```javascript
+import { getCookies, getSetCookies, setCookie, deleteCookie, parseCookie } from 'undici'
+```
+
+## Cookie interface
+
+All cookie functions work with the `Cookie` object:
+
+<ResponseField name="name" type="string">
+  The cookie name.
+</ResponseField>
+
+<ResponseField name="value" type="string">
+  The cookie value.
+</ResponseField>
+
+<ResponseField name="expires" type="Date | number">
+  Expiry date or Unix timestamp in milliseconds.
+</ResponseField>
+
+<ResponseField name="maxAge" type="number">
+  Max-Age in seconds.
+</ResponseField>
+
+<ResponseField name="domain" type="string">
+  The domain attribute.
+</ResponseField>
+
+<ResponseField name="path" type="string">
+  The path attribute.
+</ResponseField>
+
+<ResponseField name="secure" type="boolean">
+  Whether the Secure flag is set.
+</ResponseField>
+
+<ResponseField name="httpOnly" type="boolean">
+  Whether the HttpOnly flag is set.
+</ResponseField>
+
+<ResponseField name="sameSite" type="'Strict' | 'Lax' | 'None'">
+  The SameSite attribute value.
+</ResponseField>
+
+<ResponseField name="unparsed" type="string[]">
+  Left-over attributes that were not parsed.
+</ResponseField>
+
+## `getCookies(headers)`
+
+Parses the `Cookie` request header and returns a key-value map of all cookie name/value pairs.
+
+<ParamField path="headers" type="Headers" required>
+  A `Headers` instance containing the `Cookie` header.
+</ParamField>
+
+Returns: `Record<string, string>`
+
+```javascript Parsing request cookies
+import { getCookies, Headers } from 'undici'
+
+const headers = new Headers({
+  cookie: 'session=abc123; user=alice; theme=dark'
+})
+
+const cookies = getCookies(headers)
+console.log(cookies)
+// { session: 'abc123', user: 'alice', theme: 'dark' }
+
+console.log(cookies.session) // 'abc123'
+```
+
+## `getSetCookies(headers)`
+
+Parses all `Set-Cookie` response headers and returns an array of `Cookie` objects.
+
+<ParamField path="headers" type="Headers" required>
+  A `Headers` instance containing one or more `Set-Cookie` headers.
+</ParamField>
+
+Returns: `Cookie[]`
+
+```javascript Parsing Set-Cookie response headers
+import { getSetCookies, Headers } from 'undici'
+
+const headers = new Headers({
+  'set-cookie': 'undici=getSetCookies; Secure; HttpOnly; SameSite=Strict'
+})
+
+const cookies = getSetCookies(headers)
+console.log(cookies)
+// [
+//   {
+//     name: 'undici',
+//     value: 'getSetCookies',
+//     secure: true,
+//     httpOnly: true,
+//     sameSite: 'Strict'
+//   }
+// ]
+```
+
+## `setCookie(headers, cookie)`
+
+Appends a `Set-Cookie` header to a `Headers` instance.
+
+<ParamField path="headers" type="Headers" required>
+  A `Headers` instance to append the cookie to.
+</ParamField>
+
+<ParamField path="cookie" type="Cookie" required>
+  The cookie to set.
+</ParamField>
+
+Returns: `void`
+
+```javascript Setting cookies on a response
+import { setCookie, Headers } from 'undici'
+
+const headers = new Headers()
+
+setCookie(headers, {
+  name: 'session',
+  value: 'abc123',
+  httpOnly: true,
+  secure: true,
+  sameSite: 'Lax',
+  path: '/',
+  maxAge: 3600
+})
+
+console.log(headers.get('set-cookie'))
+// 'session=abc123; Path=/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax'
+```
+
+## `deleteCookie(headers, name[, attributes])`
+
+Sets a cookie's expiry to the Unix epoch (January 1, 1970), signaling browsers to delete it.
+
+<ParamField path="headers" type="Headers" required>
+  A `Headers` instance to append the delete instruction to.
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  The name of the cookie to delete.
+</ParamField>
+
+<ParamField path="attributes" type="object">
+  Optional path and domain to scope the deletion.
+  <Expandable title="attributes">
+    <ParamField path="path" type="string">
+      The cookie path.
+    </ParamField>
+    <ParamField path="domain" type="string">
+      The cookie domain.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+Returns: `void`
+
+```javascript Deleting a cookie
+import { deleteCookie, Headers } from 'undici'
+
+const headers = new Headers()
+deleteCookie(headers, 'session')
+
+console.log(headers.get('set-cookie'))
+// 'session=; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+
+// With path and domain
+deleteCookie(headers, 'user', { path: '/app', domain: 'example.com' })
+```
+
+## `parseCookie(cookieString)`
+
+Parses a raw cookie string into a `Cookie` object.
+
+<ParamField path="cookieString" type="string" required>
+  A raw `Set-Cookie` header value string.
+</ParamField>
+
+Returns: `Cookie`
+
+```javascript
+import { parseCookie } from 'undici'
+
+const cookie = parseCookie('session=abc123; Path=/; HttpOnly; Secure; SameSite=Lax')
+console.log(cookie.name)    // 'session'
+console.log(cookie.value)   // 'abc123'
+console.log(cookie.httpOnly) // true
+```
+
+## Working with fetch responses
+
+Use `getSetCookies` with fetch responses to inspect cookies returned by the server:
+
+```javascript Inspecting cookies from a fetch response
+import { fetch, getSetCookies } from 'undici'
+
+const response = await fetch('https://api.example.com/login', {
+  method: 'POST',
+  body: JSON.stringify({ username: 'alice', password: 'secret' }),
+  headers: { 'content-type': 'application/json' }
+})
+
+const cookies = getSetCookies(response.headers)
+const sessionCookie = cookies.find(c => c.name === 'session')
+console.log(sessionCookie?.value)
+```

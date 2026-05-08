@@ -1,0 +1,274 @@
+---
+title: "Diagnostics Channel: Observability for undici"
+description: "undici emits telemetry via Node.js diagnostics_channel for tracing HTTP requests, connections, WebSocket events, and proxy activity without changing application code."
+---
+
+undici integrates with Node.js's built-in [`diagnostics_channel`](https://nodejs.org/api/diagnostics_channel.html) module to publish internal events throughout the request lifecycle. This enables observability, tracing, and monitoring without modifying application code — subscribe to channels to capture request metadata, connection events, and errors.
+
+<Note>
+  Diagnostics channel support is experimental. Channels and their payloads may change in future versions.
+</Note>
+
+## Subscribing to channels
+
+```javascript
+import diagnosticsChannel from 'diagnostics_channel'
+
+diagnosticsChannel.channel('undici:request:create').subscribe(({ request }) => {
+  console.log('New request:', request.method, request.origin + request.path)
+})
+```
+
+## Request lifecycle channels
+
+### `undici:request:create`
+
+Published when a new outgoing request is created. You can add headers at this point.
+
+```javascript
+diagnosticsChannel.channel('undici:request:create').subscribe(({ request }) => {
+  console.log('origin', request.origin)
+  console.log('method', request.method)
+  console.log('path', request.path)
+  console.log('completed', request.completed)
+  console.log('headers', request.headers) // array of strings
+
+  // You can add headers here
+  request.addHeader('x-trace-id', 'abc123')
+})
+```
+
+### `undici:request:bodyChunkSent`
+
+Published for each chunk of the request body as it is sent.
+
+```javascript
+diagnosticsChannel.channel('undici:request:bodyChunkSent').subscribe(({ request, chunk }) => {
+  // request is the same object from undici:request:create
+  console.log('Sent chunk, size:', chunk.byteLength)
+})
+```
+
+### `undici:request:bodySent`
+
+Published after the full request body has been sent.
+
+```javascript
+diagnosticsChannel.channel('undici:request:bodySent').subscribe(({ request }) => {
+  console.log('Request body fully sent for:', request.path)
+})
+```
+
+### `undici:request:headers`
+
+Published after response headers are received.
+
+```javascript
+diagnosticsChannel.channel('undici:request:headers').subscribe(({ request, response }) => {
+  console.log('Status:', response.statusCode, response.statusText)
+  // response.headers are raw Buffers — convert to strings:
+  console.log('Headers:', response.headers.map(x => x.toString()))
+})
+```
+
+### `undici:request:bodyChunkReceived`
+
+Published for each chunk of the response body received.
+
+```javascript
+diagnosticsChannel.channel('undici:request:bodyChunkReceived').subscribe(({ request, chunk }) => {
+  console.log('Received response chunk, size:', chunk.byteLength)
+})
+```
+
+### `undici:request:trailers`
+
+Published after the response body and trailers are fully received (request complete).
+
+```javascript
+diagnosticsChannel.channel('undici:request:trailers').subscribe(({ request, trailers }) => {
+  console.log('Request completed:', request.path)
+  console.log('Completed flag:', request.completed)
+  // trailers are Buffers
+  console.log('Trailers:', trailers.map(x => x.toString()))
+})
+```
+
+### `undici:request:error`
+
+Published when a request is about to error.
+
+```javascript
+diagnosticsChannel.channel('undici:request:error').subscribe(({ request, error }) => {
+  console.error('Request error for', request.path, ':', error.message)
+})
+```
+
+## Connection channels
+
+### `undici:client:sendHeaders`
+
+Published just before the first byte of the request is written to the socket. Includes the exact raw headers that will be sent.
+
+```javascript
+diagnosticsChannel.channel('undici:client:sendHeaders').subscribe(({ request, headers, socket }) => {
+  console.log('Sending headers:', headers.split('\r\n'))
+})
+```
+
+### `undici:client:beforeConnect`
+
+Published before creating a new connection. Not tied to a specific request.
+
+```javascript
+diagnosticsChannel.channel('undici:client:beforeConnect').subscribe(({ connectParams, connector }) => {
+  const { host, hostname, protocol, port, servername, version } = connectParams
+  console.log('Connecting to:', `${protocol}//${host}:${port}`)
+})
+```
+
+### `undici:client:connected`
+
+Published after a connection is successfully established.
+
+```javascript
+diagnosticsChannel.channel('undici:client:connected').subscribe(({ socket, connectParams, connector }) => {
+  const { host, port } = connectParams
+  console.log('Connected to:', `${host}:${port}`)
+})
+```
+
+### `undici:client:connectError`
+
+Published when a connection attempt fails.
+
+```javascript
+diagnosticsChannel.channel('undici:client:connectError').subscribe(({ error, socket, connectParams }) => {
+  console.error('Connection failed to:', connectParams.host, '—', error.message)
+})
+```
+
+## WebSocket channels
+
+### `undici:websocket:open`
+
+Published after a WebSocket connection is successfully established.
+
+```javascript
+diagnosticsChannel.channel('undici:websocket:open').subscribe(({
+  address,           // { address, family, port }
+  protocol,          // negotiated subprotocol string
+  extensions,        // negotiated extensions string
+  websocket,         // the WebSocket instance
+  handshakeResponse  // HTTP response that upgraded the connection
+}) => {
+  console.log('WebSocket connected to:', address)
+  console.log('Negotiated protocol:', protocol)
+  // HTTP/1.1: handshakeResponse.status === 101
+  // HTTP/2:   handshakeResponse.status === 200
+  console.log('Handshake status:', handshakeResponse.status)
+})
+```
+
+### `undici:websocket:close`
+
+Published when a WebSocket connection closes.
+
+```javascript
+diagnosticsChannel.channel('undici:websocket:close').subscribe(({ websocket, code, reason }) => {
+  console.log('WebSocket closed. Code:', code, 'Reason:', reason)
+})
+```
+
+### `undici:websocket:socket_error`
+
+Published if the WebSocket's underlying socket experiences an error.
+
+```javascript
+diagnosticsChannel.channel('undici:websocket:socket_error').subscribe((error) => {
+  console.error('WebSocket socket error:', error)
+})
+```
+
+### `undici:websocket:ping` and `undici:websocket:pong`
+
+Published when ping/pong frames are received.
+
+```javascript
+diagnosticsChannel.channel('undici:websocket:ping').subscribe(({ payload, websocket }) => {
+  console.log('Ping received, payload:', payload) // Buffer or undefined
+})
+
+diagnosticsChannel.channel('undici:websocket:pong').subscribe(({ payload, websocket }) => {
+  console.log('Pong received, payload:', payload)
+})
+```
+
+## Proxy channels
+
+### `undici:proxy:connected`
+
+Published after `ProxyAgent` establishes a connection to the proxy server.
+
+```javascript
+diagnosticsChannel.channel('undici:proxy:connected').subscribe(({ socket, connectParams }) => {
+  const { origin, port, path } = connectParams
+  console.log('Proxy tunnel established to:', `${origin}:${port}${path}`)
+})
+```
+
+## Deduplicate interceptor channel
+
+### `undici:request:pending-requests`
+
+Published when the deduplicate interceptor's in-flight request map changes.
+
+```javascript
+diagnosticsChannel.channel('undici:request:pending-requests').subscribe(({ type, size, key }) => {
+  // type: 'added' or 'removed'
+  // size: current number of pending deduplicated requests
+  // key: deduplication key (origin + method + path + headers)
+  if (type === 'added') {
+    console.log(`Deduplicating: ${key} (${size} total in-flight)`)
+  } else {
+    console.log(`Completed: ${key} (${size} remaining)`)
+  }
+})
+```
+
+## Tracing example
+
+Combine multiple channels for end-to-end request tracing:
+
+```javascript Full request tracing
+import diagnosticsChannel from 'diagnostics_channel'
+
+const requests = new Map()
+
+diagnosticsChannel.channel('undici:request:create').subscribe(({ request }) => {
+  requests.set(request, { start: Date.now(), path: request.path })
+})
+
+diagnosticsChannel.channel('undici:request:headers').subscribe(({ request, response }) => {
+  const trace = requests.get(request)
+  if (trace) trace.status = response.statusCode
+})
+
+diagnosticsChannel.channel('undici:request:trailers').subscribe(({ request }) => {
+  const trace = requests.get(request)
+  if (trace) {
+    const duration = Date.now() - trace.start
+    console.log(`${trace.path} → ${trace.status} in ${duration}ms`)
+    requests.delete(request)
+  }
+})
+
+diagnosticsChannel.channel('undici:request:error').subscribe(({ request, error }) => {
+  const trace = requests.get(request)
+  if (trace) {
+    const duration = Date.now() - trace.start
+    console.error(`${trace.path} → ERROR after ${duration}ms: ${error.message}`)
+    requests.delete(request)
+  }
+})
+```

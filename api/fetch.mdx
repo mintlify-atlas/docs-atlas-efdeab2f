@@ -1,0 +1,552 @@
+---
+title: "WHATWG Fetch API: fetch, Request, Response, Headers"
+description: "Complete reference for undici WHATWG Fetch implementation including fetch(), Request, Response, Headers, FormData, body types, and Node.js-specific deviations."
+---
+
+Undici ships a complete implementation of the [WHATWG Fetch Standard](https://fetch.spec.whatwg.org/). It is fully compatible with the browser `fetch` API: the same `Request`, `Response`, `Headers`, and `FormData` classes are used, and the same body mixin methods are available on both request and response objects.
+
+<Note>
+Node.js has its own built-in `fetch` backed by a different dispatcher symbol. Keep `fetch` and `FormData` from the same implementation — either both from `undici`, both from Node.js globals, or install undici's globals with [`install()`](/api/globals). Mixing them produces unexpected multipart behavior.
+</Note>
+
+---
+
+## `undici.fetch(input, init)`
+
+Initiates an HTTP request following the Fetch standard. Returns a `Promise<Response>` that resolves when response headers are received. The response body is a Web `ReadableStream` and must be consumed.
+
+<CodeGroup>
+
+```javascript ESM
+import { fetch } from 'undici'
+
+const response = await fetch('https://api.example.com/data')
+const data = await response.json()
+```
+
+```javascript CJS
+const { fetch } = require('undici')
+
+const response = await fetch('https://api.example.com/data')
+const data = await response.json()
+```
+
+</CodeGroup>
+
+### Parameters
+
+<ParamField path="input" type="string | URL | Request" required>
+  The resource to fetch. Accepts a URL string, a WHATWG `URL` object, or a
+  `Request` object. When a `Request` is passed, the `init` options are merged
+  on top of it.
+
+  Relative URLs are resolved against the global origin set by
+  [`setGlobalOrigin()`](/api/globals#setglobalorigin). A relative URL without a
+  global origin set throws a `TypeError`.
+</ParamField>
+
+<ParamField path="init" type="object">
+  Optional request configuration.
+
+  <Expandable title="RequestInit options">
+    <ParamField path="init.method" type="string" default="GET">
+      HTTP method. Case-insensitive per spec, but sent as-is.
+    </ParamField>
+    <ParamField path="init.headers" type="string[][] | Record<string, string> | Headers">
+      Request headers. Accepts a `Headers` instance, a plain object, or an
+      array of `[name, value]` pairs. Header names are lower-cased.
+    </ParamField>
+    <ParamField path="init.body" type="BodyInit | null">
+      Request body. See [accepted body types](#accepted-body-types) below.
+      Must be `null` for `GET` and `HEAD` requests.
+    </ParamField>
+    <ParamField path="init.mode" type="string" default="cors">
+      Fetch mode. One of `'cors'`, `'no-cors'`, `'same-origin'`, `'navigate'`.
+      Undici does not enforce CORS — the mode field is accepted but CORS
+      restrictions are not applied server-side.
+    </ParamField>
+    <ParamField path="init.credentials" type="string" default="same-origin">
+      Cookie credentials mode. One of `'omit'`, `'same-origin'`, `'include'`.
+    </ParamField>
+    <ParamField path="init.cache" type="string" default="default">
+      Cache mode. One of `'default'`, `'no-store'`, `'reload'`, `'no-cache'`,
+      `'force-cache'`, `'only-if-cached'`. Undici does not implement a built-in
+      HTTP cache by default; use the `cache` interceptor for caching.
+    </ParamField>
+    <ParamField path="init.redirect" type="string" default="follow">
+      Redirect handling. One of `'follow'`, `'error'`, `'manual'`.
+    </ParamField>
+    <ParamField path="init.referrer" type="string" default="about:client">
+      Referrer URL or `'no-referrer'`.
+    </ParamField>
+    <ParamField path="init.signal" type="AbortSignal | null" default="null">
+      Abort signal. Pass an `AbortController.signal` to cancel the request.
+    </ParamField>
+    <ParamField path="init.dispatcher" type="Dispatcher">
+      Undici-specific. Override the dispatcher (e.g. a custom `Agent`, `Pool`,
+      or `ProxyAgent`) for this request only. Defaults to the global dispatcher.
+    </ParamField>
+    <ParamField path="init.duplex" type="string">
+      Undici-specific. Must be set to `'half'` when the request body is a
+      `ReadableStream` or `AsyncIterable`. See [streaming request bodies](#streaming-request-bodies).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Return value
+
+Returns `Promise<Response>`. See the [Response class](#response) section for
+the full property and method reference.
+
+### Accepted body types
+
+The `body` field of `RequestInit` and the `Response` constructor accept the
+following types:
+
+| Type | Notes |
+|------|-------|
+| `string` | Encoded as UTF-8 |
+| `ArrayBuffer` | Sent as raw bytes |
+| `ArrayBufferView` (e.g. `Uint8Array`) | Sent as raw bytes |
+| `Blob` | Content-Type set from `blob.type` if not already set |
+| `FormData` | Encoded as `multipart/form-data` |
+| `URLSearchParams` | Encoded as `application/x-www-form-urlencoded` |
+| `ReadableStream` | Streaming — requires `duplex: 'half'` |
+| `AsyncIterable<Uint8Array>` | Streaming — requires `duplex: 'half'` |
+
+### Streaming request bodies
+
+To stream a request body using a `ReadableStream` or `AsyncIterable`, you must
+set `duplex: 'half'` in `RequestInit`. Without this field, the stream is not
+accepted.
+
+```javascript Streaming request body
+import { fetch } from 'undici'
+import { Readable } from 'node:stream'
+
+async function* generateData () {
+  yield Buffer.from('chunk one\n')
+  yield Buffer.from('chunk two\n')
+}
+
+const response = await fetch('https://upload.example.com', {
+  method: 'POST',
+  body: Readable.toWeb(Readable.from(generateData())),
+  duplex: 'half',
+  headers: { 'content-type': 'text/plain' }
+})
+
+await response.body.cancel() // consume or cancel the response body
+```
+
+### Deviations from the spec
+
+Undici's fetch implementation follows the standard closely but differs in a
+few ways relevant to server-side use:
+
+- **No CORS enforcement.** CORS is a browser security mechanism. Undici does
+  not reject cross-origin requests or strip response headers based on CORS
+  rules.
+- **Forbidden header handling.** Some headers that browsers forbid (e.g.
+  `host`) can be set or are not removed.
+- **Content-Encoding limit.** At most 5 layers of `Content-Encoding` are
+  decoded. Responses with more layers result in an error.
+- **`formData()` on the server.** Parsing `multipart/form-data` with
+  `.formData()` works but is not recommended for performance-critical paths.
+  Prefer [Busboy](https://www.npmjs.com/package/busboy) or
+  [@fastify/busboy](https://www.npmjs.com/package/@fastify/busboy) instead.
+
+---
+
+## `Request`
+
+Represents an HTTP request. Implements the body mixin and all standard
+[`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) properties.
+
+```javascript Constructing a Request
+import { fetch, Request } from 'undici'
+
+const req = new Request('https://api.example.com/users', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'Alice' })
+})
+
+const response = await fetch(req)
+```
+
+### Constructor
+
+```typescript
+new Request(input: string | URL | Request, init?: RequestInit)
+```
+
+### Properties
+
+<ResponseField name="url" type="string">
+  The serialized URL of the request.
+</ResponseField>
+
+<ResponseField name="method" type="string">
+  The HTTP method, e.g. `'GET'`, `'POST'`.
+</ResponseField>
+
+<ResponseField name="headers" type="Headers">
+  A `Headers` object containing the request headers.
+</ResponseField>
+
+<ResponseField name="body" type="ReadableStream | null">
+  The request body as a Web `ReadableStream`, or `null` if none.
+</ResponseField>
+
+<ResponseField name="bodyUsed" type="boolean">
+  `true` after the body has been consumed.
+</ResponseField>
+
+<ResponseField name="signal" type="AbortSignal">
+  The abort signal associated with this request.
+</ResponseField>
+
+<ResponseField name="duplex" type="string">
+  The duplex mode. `'half'` when streaming bodies are used.
+</ResponseField>
+
+<ResponseField name="mode" type="string">
+  The fetch mode (`'cors'`, `'no-cors'`, etc.).
+</ResponseField>
+
+<ResponseField name="credentials" type="string">
+  The credentials mode (`'omit'`, `'same-origin'`, `'include'`).
+</ResponseField>
+
+<ResponseField name="cache" type="string">
+  The cache mode.
+</ResponseField>
+
+<ResponseField name="redirect" type="string">
+  The redirect mode (`'follow'`, `'error'`, `'manual'`).
+</ResponseField>
+
+<ResponseField name="referrer" type="string">
+  The referrer URL string.
+</ResponseField>
+
+<ResponseField name="referrerPolicy" type="string">
+  The referrer policy.
+</ResponseField>
+
+<ResponseField name="integrity" type="string">
+  Subresource Integrity string.
+</ResponseField>
+
+<ResponseField name="keepalive" type="boolean">
+  Whether to keep the connection alive after the page unloads (browser context).
+</ResponseField>
+
+### Methods
+
+<ResponseField name="clone()" type="Request">
+  Returns a copy of the `Request`. Throws if the body has already been consumed.
+</ResponseField>
+
+---
+
+## `Response`
+
+Represents an HTTP response. Implements the body mixin and all standard
+[`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response) properties.
+
+```javascript Reading a Response
+import { fetch } from 'undici'
+
+const response = await fetch('https://api.example.com/users/1')
+
+if (!response.ok) {
+  console.error('HTTP error', response.status)
+  await response.body.cancel()
+} else {
+  const user = await response.json()
+  console.log(user)
+}
+```
+
+### Properties
+
+<ResponseField name="status" type="number">
+  HTTP status code (e.g. `200`, `404`).
+</ResponseField>
+
+<ResponseField name="statusText" type="string">
+  HTTP status message (e.g. `'OK'`, `'Not Found'`).
+</ResponseField>
+
+<ResponseField name="ok" type="boolean">
+  `true` when `status` is in the range `200`–`299`.
+</ResponseField>
+
+<ResponseField name="headers" type="Headers">
+  Response headers as a `Headers` object.
+</ResponseField>
+
+<ResponseField name="url" type="string">
+  The final URL after any redirects.
+</ResponseField>
+
+<ResponseField name="redirected" type="boolean">
+  `true` if the response is the result of one or more redirects.
+</ResponseField>
+
+<ResponseField name="type" type="string">
+  Response type: `'basic'`, `'cors'`, `'default'`, `'error'`, `'opaque'`, or
+  `'opaqueredirect'`.
+</ResponseField>
+
+<ResponseField name="body" type="ReadableStream | null">
+  The response body as a Web `ReadableStream`. Convert to a Node.js stream with
+  `Readable.fromWeb(response.body)`.
+</ResponseField>
+
+<ResponseField name="bodyUsed" type="boolean">
+  `true` after the body has been consumed.
+</ResponseField>
+
+### Body methods
+
+All body methods return a `Promise` and consume `body` exactly once.
+
+<ResponseField name="json()" type="Promise<unknown>">
+  Parses the body as JSON.
+</ResponseField>
+
+<ResponseField name="text()" type="Promise<string>">
+  Reads the body as a UTF-8 string.
+</ResponseField>
+
+<ResponseField name="arrayBuffer()" type="Promise<ArrayBuffer>">
+  Reads the body into an `ArrayBuffer`.
+</ResponseField>
+
+<ResponseField name="blob()" type="Promise<Blob>">
+  Wraps the body in a `Blob`.
+</ResponseField>
+
+<ResponseField name="bytes()" type="Promise<Uint8Array>">
+  Returns the body as a `Uint8Array`.
+</ResponseField>
+
+<ResponseField name="formData()" type="Promise<FormData>">
+  Parses the body as `multipart/form-data` or
+  `application/x-www-form-urlencoded`. Not recommended for server-side
+  multipart parsing — use Busboy instead.
+</ResponseField>
+
+### Static methods
+
+<ResponseField name="Response.error()" type="Response">
+  Returns a network error response.
+</ResponseField>
+
+<ResponseField name="Response.redirect(url, status?)" type="Response">
+  Creates a redirect response. `status` must be one of `301`, `302`, `303`,
+  `307`, or `308`.
+</ResponseField>
+
+<ResponseField name="Response.json(data, init?)" type="Response">
+  Creates a `Response` with a JSON-serialized body and `content-type:
+  application/json`.
+</ResponseField>
+
+### Methods
+
+<ResponseField name="clone()" type="Response">
+  Returns a copy of the `Response`. Throws if the body has already been consumed.
+</ResponseField>
+
+### Converting the response body to a Node.js stream
+
+The response body is a Web `ReadableStream`. To pipe it through Node.js stream
+APIs, convert it with `Readable.fromWeb`:
+
+```javascript Converting body to a Node.js Readable
+import { fetch } from 'undici'
+import { Readable } from 'node:stream'
+import { createWriteStream } from 'node:fs'
+
+const response = await fetch('https://example.com/file.bin')
+const nodeStream = Readable.fromWeb(response.body)
+nodeStream.pipe(createWriteStream('./file.bin'))
+```
+
+---
+
+## `Headers`
+
+Implements the
+[WHATWG `Headers`](https://developer.mozilla.org/en-US/docs/Web/API/Headers)
+interface. Used by both `Request` and `Response`.
+
+```javascript Using Headers
+import { Headers } from 'undici'
+
+const headers = new Headers({
+  'content-type': 'application/json',
+  'x-api-key': 'secret'
+})
+
+headers.set('accept', 'application/json')
+console.log(headers.get('content-type')) // 'application/json'
+console.log(headers.has('x-api-key'))    // true
+headers.delete('x-api-key')
+```
+
+### Constructor
+
+```typescript
+new Headers(init?: [string, string][] | Record<string, string> | Headers)
+```
+
+### Methods
+
+<ResponseField name="get(name)" type="string | null">
+  Returns the value of the header, or `null` if not set. Multiple values are
+  joined with `', '`.
+</ResponseField>
+
+<ResponseField name="set(name, value)" type="void">
+  Sets the header, replacing any existing value.
+</ResponseField>
+
+<ResponseField name="append(name, value)" type="void">
+  Appends a value without replacing existing values for the same name.
+</ResponseField>
+
+<ResponseField name="has(name)" type="boolean">
+  Returns `true` if the header exists.
+</ResponseField>
+
+<ResponseField name="delete(name)" type="void">
+  Removes the header.
+</ResponseField>
+
+<ResponseField name="getSetCookie()" type="string[]">
+  Returns all `set-cookie` header values as an array (one per value, unlike
+  `get()` which joins them).
+</ResponseField>
+
+<ResponseField name="entries()" type="SpecIterableIterator<[string, string]>">
+  Returns an iterator of `[name, value]` pairs.
+</ResponseField>
+
+<ResponseField name="keys()" type="SpecIterableIterator<string>">
+  Returns an iterator of header names.
+</ResponseField>
+
+<ResponseField name="values()" type="SpecIterableIterator<string>">
+  Returns an iterator of header values.
+</ResponseField>
+
+<ResponseField name="forEach(callback, thisArg?)" type="void">
+  Calls `callback(value, name, headers)` for each header.
+</ResponseField>
+
+---
+
+## `FormData`
+
+Implements the
+[WHATWG `FormData`](https://developer.mozilla.org/en-US/docs/Web/API/FormData)
+interface for building `multipart/form-data` request bodies.
+
+<Warning>
+Always pair `FormData` with `fetch` from the same implementation. Mixing
+undici's `FormData` with Node.js built-in `fetch` (or vice versa) causes
+multipart encoding mismatches.
+</Warning>
+
+```javascript Submitting a form
+import { fetch, FormData } from 'undici'
+
+const form = new FormData()
+form.append('username', 'alice')
+form.append('avatar', new Blob(['...'], { type: 'image/png' }), 'avatar.png')
+
+const response = await fetch('https://example.com/profile', {
+  method: 'POST',
+  body: form
+})
+```
+
+### Constructor
+
+```typescript
+new FormData()
+```
+
+Passing any argument other than `undefined` throws an error.
+
+### Methods
+
+<ResponseField name="append(name, value, filename?)" type="void">
+  Appends a field. `value` may be a `string` or `Blob`. `filename` applies only
+  when `value` is a `Blob`.
+</ResponseField>
+
+<ResponseField name="set(name, value, filename?)" type="void">
+  Sets a field, replacing any existing entries with the same name.
+</ResponseField>
+
+<ResponseField name="get(name)" type="FormDataEntryValue | null">
+  Returns the first value for `name`, or `null`.
+</ResponseField>
+
+<ResponseField name="getAll(name)" type="FormDataEntryValue[]">
+  Returns all values for `name`.
+</ResponseField>
+
+<ResponseField name="has(name)" type="boolean">
+  Returns `true` if a field with `name` exists.
+</ResponseField>
+
+<ResponseField name="delete(name)" type="void">
+  Removes all entries with `name`.
+</ResponseField>
+
+<ResponseField name="entries()" type="IterableIterator<[string, FormDataEntryValue]>">
+  Returns an iterator of `[name, value]` pairs.
+</ResponseField>
+
+<ResponseField name="keys()" type="IterableIterator<string>">
+  Returns an iterator of field names.
+</ResponseField>
+
+<ResponseField name="values()" type="IterableIterator<FormDataEntryValue>">
+  Returns an iterator of field values.
+</ResponseField>
+
+<ResponseField name="forEach(callback)" type="void">
+  Calls `callback(value, name, formData)` for each entry.
+</ResponseField>
+
+### Parsing multipart responses
+
+For server-side multipart parsing, use
+[Busboy](https://www.npmjs.com/package/busboy) or
+[@fastify/busboy](https://www.npmjs.com/package/@fastify/busboy):
+
+```javascript Parsing multipart with Busboy
+import { Busboy } from '@fastify/busboy'
+import { Readable } from 'node:stream'
+import { fetch } from 'undici'
+
+const response = await fetch('https://example.com/multipart-endpoint')
+const busboy = new Busboy({
+  headers: { 'content-type': response.headers.get('content-type') }
+})
+
+busboy.on('file', (field, stream, filename) => {
+  console.log(`Receiving file: ${filename}`)
+  stream.resume()
+})
+
+Readable.fromWeb(response.body).pipe(busboy)
+```

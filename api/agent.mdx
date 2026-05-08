@@ -1,0 +1,173 @@
+---
+title: "Agent: multi-origin HTTP dispatcher for undici"
+description: "API reference for undici Agent — manages connection pools per origin with custom factories, interceptors, and setGlobalDispatcher for application-wide HTTP."
+keywords: ["undici", "agent", "global dispatcher", "multi-origin", "http client", "node.js"]
+---
+
+`Agent` is a `Dispatcher` that transparently manages one connection pool per origin. When you make a request to `https://api.example.com`, Agent creates (and caches) a `Pool` for that origin. The next request to the same origin reuses the pool. When no requests remain for an origin, Agent closes and discards the pool automatically.
+
+Agent is the right choice when your application talks to multiple services or when you want a single dispatcher wired up via `setGlobalDispatcher` so that every call to `fetch()` or `undici.request()` uses your configuration.
+
+<Note>
+  `Agent` extends `Dispatcher`. All methods (`request`, `stream`, `pipeline`,
+  `dispatch`, `connect`, `upgrade`, `close`, `destroy`) are inherited — see
+  the [Dispatcher reference](/api/dispatcher) for full signatures.
+</Note>
+
+---
+
+## Constructor
+
+### `new Agent(options?)`
+
+<ParamField path="body.factory" type="(origin: URL, opts: object) => Dispatcher" default="(origin, opts) => new Pool(origin, opts)">
+  Called once per origin to create the backing dispatcher. When
+  `connections === 1`, the default factory creates a `Client` instead of a
+  `Pool`. Override this to use custom classes, decorate with interceptors, or
+  apply per-origin configuration.
+</ParamField>
+
+<ParamField path="body.maxOrigins" type="number" default="Infinity">
+  Maximum number of distinct origins the agent will dispatch to simultaneously.
+  Throws `MaxOriginsReachedError` when the limit is reached and a new origin
+  is requested.
+</ParamField>
+
+<ParamField path="body.connect" type="ConnectOptions | Function | null" default="null">
+  TLS and socket options forwarded to every pool/client created by `factory`.
+  Pass a function for a custom connector.
+</ParamField>
+
+All [`PoolOptions`](/api/pool) are accepted and forwarded to each pool created by `factory`.
+
+---
+
+## Methods
+
+All standard `Dispatcher` methods are available. `Agent.dispatch()` requires that `options.origin` is set because Agent uses it to look up (or create) the correct pool.
+
+### `agent.stats()`
+
+Returns per-origin statistics as a `Record<string, ClientStats | PoolStats>` keyed by origin string.
+
+```javascript title="Inspecting per-origin stats"
+import { Agent } from 'undici'
+
+const agent = new Agent()
+
+await agent.request({ origin: 'https://api.example.com', path: '/', method: 'GET' })
+
+const stats = agent.stats()
+console.log(stats['https://api.example.com'])
+// { connected: 1, free: 1, pending: 0, queued: 0, running: 0, size: 0 }
+```
+
+---
+
+## Properties
+
+<ResponseField name="agent.closed" type="boolean">
+  `true` after `agent.close()` has been called.
+</ResponseField>
+
+<ResponseField name="agent.destroyed" type="boolean">
+  `true` after `agent.destroy()` has been called or close has completed.
+</ResponseField>
+
+---
+
+## Code examples
+
+```javascript title="Basic Agent usage"
+import { Agent } from 'undici'
+
+const agent = new Agent({ connections: 10 })
+
+const { statusCode, body } = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/users',
+  method: 'GET',
+})
+
+console.log(await body.json())
+await agent.close()
+```
+
+```javascript title="Global dispatcher — applies to fetch() and undici.request()"
+import { Agent, setGlobalDispatcher, fetch } from 'undici'
+
+setGlobalDispatcher(new Agent({
+  connections: 20,
+  pipelining: 1,
+  keepAliveTimeout: 10_000,
+  keepAliveMaxTimeout: 60_000,
+}))
+
+// All subsequent fetch() calls use the configured agent
+const response = await fetch('https://api.example.com/data')
+const data = await response.json()
+```
+
+```javascript title="Custom factory — per-origin interceptors"
+import { Agent, Client, interceptors } from 'undici'
+
+const agent = new Agent({
+  factory: (origin, opts) => {
+    const client = new Client(origin, opts)
+
+    // Add retry logic to every client for every origin
+    return client.compose(
+      interceptors.retry({ maxRetries: 3, minTimeout: 500 })
+    )
+  },
+})
+
+const { statusCode } = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/items',
+  method: 'GET',
+})
+```
+
+```javascript title="Capping the number of origins"
+import { Agent } from 'undici'
+
+// Allow at most 50 distinct origins to be active at once
+const agent = new Agent({ maxOrigins: 50 })
+```
+
+---
+
+## `setGlobalDispatcher` and `getGlobalDispatcher`
+
+These helpers control the dispatcher used by `undici.request()`, `undici.fetch()`, and other module-level functions.
+
+```javascript title="Wiring up a global Agent"
+import {
+  Agent,
+  setGlobalDispatcher,
+  getGlobalDispatcher,
+  request,
+} from 'undici'
+
+setGlobalDispatcher(new Agent({ connections: 10 }))
+
+// Subsequent calls use the global agent automatically
+const { statusCode } = await request('https://api.example.com/items')
+
+// Retrieve the current global dispatcher
+const current = getGlobalDispatcher()
+```
+
+<Tip>
+  Set the global dispatcher once during application startup. Avoid calling
+  `setGlobalDispatcher` in request handlers or middleware — creating a new
+  Agent per request prevents connection reuse and leaks resources.
+</Tip>
+
+<Note>
+  `setGlobalDispatcher` also exposes the dispatcher under
+  `Symbol.for('undici.globalDispatcher.1')` via a `Dispatcher1Wrapper` so
+  that Node.js built-in `fetch` (which uses the legacy v1 handler contract)
+  continues to work after you replace the global dispatcher.
+</Note>

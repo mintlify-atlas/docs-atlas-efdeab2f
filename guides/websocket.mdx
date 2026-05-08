@@ -1,0 +1,294 @@
+---
+title: "WebSocket Connections with undici's WebSocket API"
+description: "Use undici's WHATWG WebSocket class in Node.js to open connections, send messages, receive binary data, and manage connection lifecycle with ping/pong."
+---
+
+Undici implements the [WHATWG WebSocket API](https://websockets.spec.whatwg.org/) as defined in the browser spec, giving Node.js applications the same `WebSocket` interface available in browsers — without any CORS restrictions. The implementation follows RFC 6455 and supports text and binary frames, subprotocols, custom dispatchers (including proxy agents), and HTTP/2 upgrades. A streaming variant, `WebSocketStream`, is also available for backpressure-aware consumption.
+
+## Basic connection
+
+```javascript title="Opening a WebSocket connection"
+import { WebSocket } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events')
+
+ws.onopen = () => {
+  console.log('Connection established')
+  ws.send('Hello, server!')
+}
+
+ws.onmessage = (event) => {
+  console.log('Received:', event.data)
+}
+
+ws.onerror = (event) => {
+  console.error('WebSocket error:', event)
+}
+
+ws.onclose = (event) => {
+  console.log(`Connection closed — code: ${event.code}, reason: ${event.reason}`)
+}
+```
+
+---
+
+## Constructor
+
+```javascript
+new WebSocket(url[, protocols])
+```
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `url` | `string \| URL` | The WebSocket server URL (`ws://` or `wss://`) |
+| `protocols` | `string \| string[] \| WebSocketInit` | Subprotocol(s) or a `WebSocketInit` options object |
+
+### `WebSocketInit` options object
+
+Passing an object as the second argument gives access to additional options not available in the browser `WebSocket` API:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `protocols` | `string \| string[]` | Subprotocol(s) to request |
+| `dispatcher` | `Dispatcher` | A custom undici dispatcher (e.g. `ProxyAgent`) |
+| `headers` | `HeadersInit` | Custom headers to include in the WebSocket handshake |
+
+```javascript title="WebSocket with custom dispatcher and protocols"
+import { WebSocket, ProxyAgent } from 'undici'
+
+const proxyAgent = new ProxyAgent('http://my.proxy.server:8080')
+
+const ws = new WebSocket('wss://echo.websocket.events', {
+  dispatcher: proxyAgent,
+  protocols: ['echo', 'chat']
+})
+```
+
+If you only need subprotocols (no custom dispatcher), use the array form:
+
+```javascript title="WebSocket with subprotocols only"
+import { WebSocket } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events', ['echo', 'chat'])
+```
+
+---
+
+## Event listeners
+
+WebSocket fires four events. You can assign handlers via `onXxx` properties or via `addEventListener`:
+
+<Tabs>
+  <Tab title="onXxx handlers">
+    ```javascript
+    ws.onopen    = (event) => console.log('open')
+    ws.onmessage = (event) => console.log('message:', event.data)
+    ws.onerror   = (event) => console.error('error:', event)
+    ws.onclose   = (event) => console.log('close:', event.code, event.reason)
+    ```
+  </Tab>
+  <Tab title="addEventListener">
+    ```javascript
+    ws.addEventListener('open',    (event) => console.log('open'))
+    ws.addEventListener('message', (event) => console.log('message:', event.data))
+    ws.addEventListener('error',   (event) => console.error('error:', event))
+    ws.addEventListener('close',   (event) => console.log('close:', event.code, event.reason))
+    ```
+  </Tab>
+</Tabs>
+
+### `readyState` constants
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `WebSocket.CONNECTING` | `0` | Connection not yet established |
+| `WebSocket.OPEN` | `1` | Connection established; data can be sent |
+| `WebSocket.CLOSING` | `2` | Close handshake in progress |
+| `WebSocket.CLOSED` | `3` | Connection is closed |
+
+---
+
+## Sending messages
+
+Call `ws.send(data)` after the connection is open. Supported data types are `string`, `ArrayBuffer`, typed arrays, and `Blob`.
+
+<Warning>
+  Calling `send()` before the connection is open (i.e. while `readyState === CONNECTING`) throws an `InvalidStateError` `DOMException`.
+</Warning>
+
+```javascript title="Sending text and binary data"
+import { WebSocket } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events')
+
+ws.onopen = () => {
+  // Text frame
+  ws.send('Hello, world!')
+
+  // Binary frame — ArrayBuffer
+  const buffer = new ArrayBuffer(4)
+  const view = new Uint32Array(buffer)
+  view[0] = 42
+  ws.send(buffer)
+
+  // Binary frame — TypedArray
+  const bytes = new Uint8Array([1, 2, 3, 4])
+  ws.send(bytes)
+}
+```
+
+---
+
+## Receiving messages
+
+Incoming messages arrive on the `message` event. Binary messages are delivered as a `Blob` by default; change `ws.binaryType` to `'arraybuffer'` to receive them as `ArrayBuffer` instead.
+
+```javascript title="Receiving text and binary messages"
+import { WebSocket } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events')
+
+// Receive binary data as ArrayBuffer instead of Blob (default)
+ws.binaryType = 'arraybuffer'
+
+ws.onmessage = async (event) => {
+  if (typeof event.data === 'string') {
+    console.log('Text message:', event.data)
+  } else if (event.data instanceof ArrayBuffer) {
+    const view = new Uint8Array(event.data)
+    console.log('Binary message (bytes):', view)
+  } else if (event.data instanceof Blob) {
+    const text = await event.data.text()
+    console.log('Blob message:', text)
+  }
+}
+```
+
+---
+
+## Closing connections
+
+Call `ws.close([code[, reason]])` to initiate a clean WebSocket closing handshake. The `close` event fires when the connection is fully closed.
+
+```javascript title="Closing with code and reason"
+import { WebSocket } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events')
+
+ws.onopen = () => {
+  setTimeout(() => {
+    // 1000 = normal closure
+    ws.close(1000, 'Session complete')
+  }, 5000)
+}
+
+ws.onclose = (event) => {
+  console.log(`Closed — code: ${event.code}, clean: ${event.wasClean}`)
+}
+```
+
+<Note>
+  Common close codes: `1000` (normal), `1001` (going away), `1006` (abnormal — no close frame received), `1011` (server error). The close reason must be a UTF-8 string of at most 123 bytes.
+</Note>
+
+---
+
+## Sending ping frames
+
+Use the exported `ping()` function to send a WebSocket ping frame for keepalive or connection verification. The server must reply with a pong frame containing the same payload.
+
+```javascript title="Sending a ping"
+import { WebSocket, ping } from 'undici'
+
+const ws = new WebSocket('wss://echo.websocket.events')
+
+ws.addEventListener('open', () => {
+  // Ping with no payload
+  ping(ws)
+
+  // Ping with payload (must not exceed 125 bytes)
+  const payload = Buffer.from('keepalive')
+  ping(ws, payload)
+})
+```
+
+<Note>
+  A ping frame payload cannot exceed 125 bytes. Pings are silently ignored if the connection is not in the `OPEN` state.
+</Note>
+
+---
+
+## `WebSocketStream` for stream-based access
+
+`WebSocketStream` provides a streams-based interface with built-in backpressure support. The API is based on the [WHATWG WebSocketStream proposal](https://developer.mozilla.org/en-US/docs/Web/API/WebSocketStream) and is still experimental.
+
+```javascript title="WebSocketStream example"
+import { WebSocketStream } from 'undici'
+
+const stream = new WebSocketStream('wss://echo.websocket.events')
+const { readable, writable } = await stream.opened
+
+async function readMessages () {
+  const reader = readable.getReader()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    console.log('Received:', value)
+  }
+}
+
+async function writeMessages () {
+  const writer = writable.getWriter()
+  writer.write('Hello from stream!')
+  writer.releaseLock()
+}
+
+readMessages()
+setInterval(writeMessages, 5000)
+```
+
+<Warning>
+  The `WebSocketStream` API has not been finalized and is likely to change in future versions of undici.
+</Warning>
+
+---
+
+## HTTP/2 WebSocket connections
+
+WebSocket over HTTP/2 is supported experimentally. Pass an `Agent` with `allowH2: true` as the dispatcher:
+
+```javascript title="WebSocket over HTTP/2"
+import { Agent, WebSocket } from 'undici'
+
+const agent = new Agent({ allowH2: true })
+
+const ws = new WebSocket('wss://echo.websocket.events', {
+  dispatcher: agent,
+  protocols: ['echo', 'chat']
+})
+```
+
+<Warning>
+  WebSocket over HTTP/2 is experimental and subject to change. Monitor the undici changelog for updates on when it will be enabled by default.
+</Warning>
+
+---
+
+## Difference from browser WebSocket
+
+Undici's `WebSocket` is intentionally API-compatible with the browser's `WebSocket` global, but it runs in Node.js so a few differences apply:
+
+- **No CORS restrictions** — server-side code can connect to any origin
+- **Custom dispatchers** — pass a `ProxyAgent` or other dispatcher via `WebSocketInit`
+- **Custom headers** — set arbitrary handshake headers via `WebSocketInit.headers` (browsers don't allow this)
+- **`ping()` function** — browsers do not expose an API to send raw ping frames; undici provides one as a named export
+
+```javascript title="Custom handshake headers (Node.js only)"
+import { WebSocket } from 'undici'
+
+const ws = new WebSocket('wss://api.example.com/ws', {
+  headers: {
+    Authorization: 'Bearer my-secret-token'
+  }
+})
+```

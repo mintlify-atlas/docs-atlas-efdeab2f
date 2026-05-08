@@ -1,0 +1,218 @@
+---
+title: "RetryAgent: automatic HTTP request retries"
+description: "API reference for undici RetryAgent — wraps any Dispatcher with retry logic: configurable status codes, error codes, HTTP methods, and exponential backoff."
+keywords: ["undici", "retry", "retry agent", "exponential backoff", "http retry", "node.js"]
+---
+
+`RetryAgent` wraps any `Dispatcher` — a `Client`, `Pool`, `Agent`, or even another `RetryAgent` — and automatically retries requests that fail due to network errors or particular HTTP status codes. It uses exponential backoff with a configurable factor and respects `Retry-After` response headers from the server.
+
+<Note>
+  undici also offers an `interceptors.retry` interceptor that can be composed
+  onto any dispatcher via `.compose()`. The key difference is scope:
+  `RetryAgent` wraps an entire dispatcher so every request through it is
+  retried, while `interceptors.retry` can be applied selectively at the
+  dispatcher or even at the request level when composed with `.compose()`.
+</Note>
+
+---
+
+## Constructor
+
+### `new RetryAgent(dispatcher, options?)`
+
+<ParamField path="body.dispatcher" type="Dispatcher" required>
+  The underlying dispatcher to wrap. Can be a `Client`, `Pool`, `Agent`,
+  `ProxyAgent`, or any other `Dispatcher` instance.
+</ParamField>
+
+<ParamField path="body.maxRetries" type="number" default="5">
+  Maximum number of retry attempts before the error is thrown to the caller.
+</ParamField>
+
+<ParamField path="body.minTimeout" type="number" default="500">
+  Minimum milliseconds to wait before the first retry.
+</ParamField>
+
+<ParamField path="body.maxTimeout" type="number" default="30000">
+  Maximum milliseconds to wait between retries, regardless of the backoff
+  calculation.
+</ParamField>
+
+<ParamField path="body.timeoutFactor" type="number" default="2">
+  Multiplier applied to the timeout on each successive retry attempt
+  (exponential backoff). With `minTimeout: 500` and `timeoutFactor: 2`, waits
+  are: 500 ms, 1000 ms, 2000 ms, 4000 ms, …
+</ParamField>
+
+<ParamField path="body.retryAfter" type="boolean" default="true">
+  When `true`, honour the `Retry-After` response header. The agent waits for
+  the indicated duration before retrying instead of using the backoff
+  calculation.
+</ParamField>
+
+<ParamField path="body.statusCodes" type="number[]" default="[429, 500, 502, 503, 504]">
+  HTTP response status codes that trigger a retry.
+</ParamField>
+
+<ParamField path="body.methods" type="string[]" default="['GET', 'PUT', 'HEAD', 'OPTIONS', 'DELETE']">
+  HTTP methods eligible for retry. Non-idempotent methods like `POST` and
+  `PATCH` are excluded by default to prevent unintended duplicate writes.
+</ParamField>
+
+<ParamField path="body.errorCodes" type="string[]" default="['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'ENETDOWN', 'ENETUNREACH', 'EHOSTDOWN', 'UND_ERR_SOCKET']">
+  Node.js error codes that trigger a retry regardless of status code.
+</ParamField>
+
+<ParamField path="body.throwOnError" type="boolean" default="true">
+  When `true`, throws an error after the final retry attempt fails. Set to
+  `false` if you need access to the response body on error responses or want
+  to handle failures in a custom `retry` callback.
+</ParamField>
+
+<ParamField path="body.retry" type="(err: Error, context: RetryContext, callback: (err?: Error | null) => void) => void">
+  Custom retry decision function. Called after every failed attempt. Invoke
+  `callback()` to retry, or `callback(err)` to stop retrying and propagate
+  the error.
+
+  <Expandable title="RetryContext fields">
+    <ResponseField name="state" type="RetryState">
+      Current retry state object. Mutable — you can attach custom data here to
+      share state between retry attempts.
+    </ResponseField>
+    <ResponseField name="opts" type="DispatchOptions & RetryOptions">
+      The full options passed to the retry handler, including all dispatch and
+      retry configuration.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+---
+
+## Methods
+
+`RetryAgent` exposes `dispatch()`, `close()`, and `destroy()` which delegate to the wrapped dispatcher after applying retry logic.
+
+---
+
+## Code examples
+
+```javascript title="Basic RetryAgent"
+import { Agent, RetryAgent } from 'undici'
+
+const agent = new RetryAgent(new Agent())
+
+const { statusCode, body } = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/data',
+  method: 'GET',
+})
+
+console.log(statusCode)
+console.log(await body.text())
+```
+
+```javascript title="Custom retry configuration"
+import { Agent, RetryAgent } from 'undici'
+
+const agent = new RetryAgent(new Agent(), {
+  maxRetries: 3,
+  minTimeout: 1000,
+  maxTimeout: 10_000,
+  timeoutFactor: 2,
+  statusCodes: [429, 503],
+  methods: ['GET', 'HEAD'],
+})
+
+const { statusCode } = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/items',
+  method: 'GET',
+})
+```
+
+```javascript title="Custom retry logic with callback"
+import { Agent, RetryAgent } from 'undici'
+
+const agent = new RetryAgent(new Agent(), {
+  maxRetries: 5,
+  retry(err, { state, opts }, callback) {
+    // Stop retrying on authentication errors
+    if (err.statusCode === 401 || err.statusCode === 403) {
+      return callback(err)
+    }
+
+    // Log each retry attempt
+    console.warn(`Retry attempt ${state.counter} for ${opts.path}`)
+
+    // Continue retrying (use default backoff)
+    callback()
+  },
+})
+```
+
+```javascript title="RetryAgent wrapping a ProxyAgent"
+import { ProxyAgent, RetryAgent } from 'undici'
+
+const agent = new RetryAgent(
+  new ProxyAgent('http://proxy.example.com:8080'),
+  { maxRetries: 3, statusCodes: [429, 502, 503, 504] }
+)
+
+const { statusCode } = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/data',
+  method: 'GET',
+})
+```
+
+```javascript title="Retrying without throwing on final failure"
+import { Agent, RetryAgent } from 'undici'
+
+const agent = new RetryAgent(new Agent(), {
+  maxRetries: 3,
+  throwOnError: false, // return the last error response instead of throwing
+})
+
+const { statusCode, body } = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/data',
+  method: 'GET',
+})
+
+if (statusCode >= 500) {
+  // Inspect the error body even after exhausting retries
+  console.error('Server error:', await body.text())
+}
+```
+
+---
+
+## RetryAgent vs `interceptors.retry`
+
+Both mechanisms add retry behaviour, but they differ in how they are applied:
+
+| | `RetryAgent` | `interceptors.retry` |
+|---|---|---|
+| Applied to | Entire wrapped dispatcher | Specific dispatcher via `.compose()` |
+| Granularity | All requests through the agent | Can be scoped per-dispatcher or chained |
+| Usage | `new RetryAgent(dispatcher, opts)` | `dispatcher.compose(interceptors.retry(opts))` |
+| Composable with other interceptors | Wrap the composed result | Yes, via chained `.compose()` |
+
+```javascript title="Equivalent using interceptors.retry"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.retry({
+    maxRetries: 3,
+    minTimeout: 500,
+    statusCodes: [429, 503],
+  })
+)
+```
+
+<Tip>
+  Use `RetryAgent` when you want retry logic on a discrete dispatcher object
+  (e.g. to pass it to `setGlobalDispatcher` or to a specific service client).
+  Use `interceptors.retry` when you want to compose retry alongside other
+  interceptors (e.g. cache, dns, redirect) on the same dispatcher.
+</Tip>

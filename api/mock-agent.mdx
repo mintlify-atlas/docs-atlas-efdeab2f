@@ -1,0 +1,408 @@
+---
+title: "MockAgent: HTTP Mocking API for undici"
+description: "Intercept HTTP requests made through undici and return mocked responses. Covers interceptors, assertions, call history, and network control."
+---
+
+`MockAgent` is the primary entry point for HTTP mocking in undici. It extends `Dispatcher` and wraps a real `Agent`, intercepting requests before they hit the network so your tests never depend on external services. When set as the global dispatcher, every `request()` or `fetch()` call in your process routes through the mock layer automatically.
+
+## Constructor
+
+```javascript title="Instantiating MockAgent"
+import { MockAgent } from 'undici'
+
+const mockAgent = new MockAgent()
+```
+
+<ParamField body="options" type="object">
+  Options passed to the underlying `Agent`. All `AgentOptions` are supported in addition to the following.
+
+  <Expandable title="MockAgentOptions">
+    <ParamField body="agent" type="Agent">
+      A custom `Agent` instance to encapsulate. Defaults to `new Agent(options)`.
+    </ParamField>
+    <ParamField body="connections" type="number">
+      Number of connections per origin. When set to `1`, `mockAgent.get()` returns a `MockClient`; otherwise it returns a `MockPool`.
+    </ParamField>
+    <ParamField body="ignoreTrailingSlash" type="boolean" default="false">
+      Set the default `ignoreTrailingSlash` value for all interceptors registered through this agent.
+    </ParamField>
+    <ParamField body="acceptNonStandardSearchParameters" type="boolean" default="false">
+      When `true`, query matching also accepts non-standard formats such as multi-value params with `[]` notation (`param[]=1&param[]=2`) and comma-separated values (`param=1,2,3`).
+    </ParamField>
+    <ParamField body="enableCallHistory" type="boolean" default="false">
+      When `true`, every dispatched request is recorded in a `MockCallHistory` instance accessible via `mockAgent.getCallHistory()`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Activation
+
+### Setting as the global dispatcher
+
+The most common pattern is to install `MockAgent` as the global dispatcher so all requests in the process go through it:
+
+```javascript title="Global MockAgent setup"
+import { MockAgent, setGlobalDispatcher } from 'undici'
+
+const mockAgent = new MockAgent()
+setGlobalDispatcher(mockAgent)
+```
+
+### `mockAgent.get(origin)`
+
+Returns the `MockPool` (or `MockClient` when `connections === 1`) for the given origin, creating it if it does not already exist. This is the object on which you register interceptors.
+
+<ParamField body="origin" type="string | RegExp | (value: string) => boolean" required>
+  The origin to retrieve or create a mock dispatcher for.
+
+  | Matcher type | Condition to pass |
+  |:---:|---|
+  | `string` | Exact match |
+  | `RegExp` | Regex must pass |
+  | `Function` | Must return `true` |
+</ParamField>
+
+<ResponseField name="returns" type="MockClient | MockPool">
+  Returns `MockClient` when `connections === 1`, otherwise `MockPool`.
+</ResponseField>
+
+```javascript title="Getting a MockPool for an origin"
+const mockPool = mockAgent.get('http://localhost:3000')
+```
+
+```javascript title="Origin matching with RegExp"
+const mockPool = mockAgent.get(new RegExp('http://localhost:3000'))
+```
+
+```javascript title="Origin matching with a function"
+const mockPool = mockAgent.get((origin) => origin === 'http://localhost:3000')
+```
+
+### `mockAgent.activate()` / `mockAgent.deactivate()`
+
+`MockAgent` is active by default. Call `deactivate()` to disable mocking temporarily and `activate()` to re-enable it.
+
+```javascript title="Temporarily disabling mocks"
+mockAgent.deactivate()
+// Requests pass through to the real network (if net connect is enabled)
+
+mockAgent.activate()
+// Mocking is restored
+```
+
+## Interceptors
+
+Interceptors define the rules for matching requests and the responses to return. You register them on a `MockPool` or `MockClient` obtained from `mockAgent.get()`.
+
+### `mockPool.intercept(options)`
+
+Returns a `MockInterceptor` that you chain to define the response.
+
+<ParamField body="options" type="object" required>
+  <Expandable title="MockPoolInterceptOptions">
+    <ParamField body="path" type="string | RegExp | (path: string) => boolean" required>
+      Matches the request path including query string. When a `string` is provided, use the `query` option for query parameters instead of embedding them in the path. When a `RegExp` or function is used, it matches against the full path with query parameters in alphabetical order.
+    </ParamField>
+    <ParamField body="method" type="string | RegExp | (method: string) => boolean" default="'GET'">
+      Matches the HTTP method.
+    </ParamField>
+    <ParamField body="body" type="string | RegExp | (body: string) => boolean">
+      Matches the request body.
+    </ParamField>
+    <ParamField body="headers" type="Record<string, string | RegExp | (value: string) => boolean>">
+      Matches request headers. Every key defined here must match; extra headers in the request are ignored.
+    </ParamField>
+    <ParamField body="query" type="Record<string, any> | null">
+      Matches query string parameters. Only applies when `path` is a `string`.
+    </ParamField>
+    <ParamField body="ignoreTrailingSlash" type="boolean" default="false">
+      When `true`, trailing slashes in `path` are ignored during matching.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="returns" type="MockInterceptor">
+  A `MockInterceptor` instance. Chain the methods below to define the response.
+</ResponseField>
+
+### `mockInterceptor.reply(statusCode, body, options?)`
+
+Defines the response returned when the interceptor matches.
+
+<ParamField body="statusCode" type="number" required>
+  HTTP status code for the mocked response.
+</ParamField>
+<ParamField body="body" type="string | Buffer | object | (opts: RequestInfo) => body">
+  Response body. Objects are serialized as JSON. Strings and buffers are sent as-is. Pass a callback to compute the body dynamically from the incoming request — the callback receives `{ method, url, body, headers, origin }`.
+</ParamField>
+<ParamField body="options" type="object">
+  <Expandable title="MockResponseOptions">
+    <ParamField body="headers" type="Record<string, string>">
+      Response headers to include.
+    </ParamField>
+    <ParamField body="trailers" type="Record<string, string>">
+      Response trailers to include.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### `mockInterceptor.reply(callback)`
+
+Alternative signature — pass a single callback that returns the full reply options:
+
+```javascript title="Reply with a full options callback"
+mockPool.intercept({ path: '/echo', method: 'GET' }).reply(({ headers }) => ({
+  statusCode: 200,
+  data: { message: headers.get('message') }
+}))
+```
+
+### `mockInterceptor.replyWithError(error)`
+
+Causes the matched request to throw the given error.
+
+```javascript title="Simulating a network error"
+mockPool.intercept({ path: '/failing' }).replyWithError(new Error('kaboom'))
+```
+
+### `mockInterceptor.defaultReplyHeaders(headers)`
+
+Sets headers that are merged into every subsequent `reply()` on this interceptor.
+
+<ParamField body="headers" type="Record<string, string>" required>
+  Default response headers.
+</ParamField>
+
+### `mockInterceptor.defaultReplyTrailers(trailers)`
+
+Sets trailers that are merged into every subsequent `reply()` on this interceptor.
+
+<ParamField body="trailers" type="Record<string, string>" required>
+  Default response trailers.
+</ParamField>
+
+### `mockInterceptor.replyContentLength()`
+
+Automatically calculates and includes a `content-length` header in the response.
+
+### MockScope — controlling repeat behaviour
+
+`reply()`, `replyWithError()`, and the other reply methods return a `MockScope`. Use the following methods to control how many times the interceptor fires:
+
+<ResponseField name="persist()" type="MockScope">
+  The interceptor matches indefinitely. Without this, each interceptor matches once by default.
+</ResponseField>
+
+<ResponseField name="times(n)" type="MockScope">
+  The interceptor matches exactly `n` times. Overridden by `persist()`.
+</ResponseField>
+
+<ResponseField name="delay(ms)" type="MockScope">
+  Delays the reply by `ms` milliseconds.
+</ResponseField>
+
+### Matcher types
+
+All `path`, `method`, `body`, and individual header values accept three matcher types:
+
+| Type | Behaviour |
+|---|---|
+| `string` | Exact equality check |
+| `RegExp` | `regex.test(value)` must be `true` |
+| `Function` | Function must return `true` |
+
+```javascript title="Mixed matchers on an interceptor"
+mockPool.intercept({
+  path: '/foo',
+  method: /^GET$/,
+  body: (value) => value === 'form=data',
+  headers: {
+    'User-Agent': 'undici',
+    Host: /^example\.com$/
+  }
+}).reply(200, 'matched')
+```
+
+## Network control
+
+### `mockAgent.disableNetConnect()`
+
+Causes any request that does not match a registered interceptor to throw a `MockNotMatchedError`. Use this in tests to ensure every network call is explicitly mocked.
+
+```javascript title="Disabling real network access"
+mockAgent.disableNetConnect()
+```
+
+### `mockAgent.enableNetConnect(host?)`
+
+Allows unmatched requests to reach the real network, optionally restricted to specific hosts. Calling this without arguments allows all real requests.
+
+<ParamField body="host" type="string | RegExp | (value: string) => boolean">
+  When provided, only requests matching this host are allowed through. When omitted, all requests are permitted. Call multiple times to allow multiple hosts.
+</ParamField>
+
+```javascript title="Allowing specific hosts to bypass mocking"
+mockAgent.enableNetConnect('example-1.com')
+mockAgent.enableNetConnect('example-2.com:8080')
+```
+
+## Assertions
+
+### `mockAgent.assertNoPendingInterceptors(options?)`
+
+Throws an `UndiciError` if any registered interceptors have not been fully consumed. An interceptor is pending when it was registered but:
+
+- has not been invoked at all (single-use default), or
+- is persistent (`.persist()`) but was never called, or
+- has fewer invocations remaining than `times(n)` requires.
+
+Use this at the end of a test to ensure all expected requests were made.
+
+```javascript title="Asserting all interceptors were consumed"
+agent.assertNoPendingInterceptors()
+// Throws with a table listing pending interceptors if any remain
+```
+
+### `mockAgent.pendingInterceptors()`
+
+Returns an array of all pending interceptors without throwing. Each entry is a `MockDispatch` augmented with an `origin` field.
+
+## Call history
+
+Call history must be enabled either at construction time via `enableCallHistory: true` or by calling `mockAgent.enableCallHistory()` afterwards.
+
+### Enabling history
+
+```javascript title="Enabling call history at construction"
+const mockAgent = new MockAgent({ enableCallHistory: true })
+```
+
+```javascript title="Enabling call history after construction"
+const mockAgent = new MockAgent()
+mockAgent.enableCallHistory()
+```
+
+### `mockAgent.getCallHistory()`
+
+Returns the `MockCallHistory` instance, or `undefined` if history was never enabled.
+
+### `MockCallHistory` methods
+
+<ResponseField name="calls()" type="MockCallHistoryLog[]">
+  Returns all recorded call logs as an array.
+</ResponseField>
+<ResponseField name="firstCall()" type="MockCallHistoryLog | undefined">
+  Returns the first recorded call.
+</ResponseField>
+<ResponseField name="lastCall()" type="MockCallHistoryLog | undefined">
+  Returns the most recent recorded call.
+</ResponseField>
+<ResponseField name="nthCall(n)" type="MockCallHistoryLog | undefined">
+  Returns the nth call (1-indexed). Throws if `n` is not a positive integer.
+</ResponseField>
+<ResponseField name="filterCalls(criteria, options?)" type="MockCallHistoryLog[]">
+  Filters recorded calls. `criteria` can be a function, `RegExp`, or an object with `MockCallHistoryLog` property keys. The optional `options.operator` is `'OR'` (default) or `'AND'`.
+</ResponseField>
+<ResponseField name="filterCallsByPath(value)" type="MockCallHistoryLog[]">
+  Filters by `path`. Accepts a string or `RegExp`.
+</ResponseField>
+<ResponseField name="filterCallsByMethod(value)" type="MockCallHistoryLog[]">
+  Filters by HTTP method. Accepts a string or `RegExp`.
+</ResponseField>
+<ResponseField name="filterCallsByOrigin(value)" type="MockCallHistoryLog[]">
+  Filters by origin. Accepts a string or `RegExp`.
+</ResponseField>
+<ResponseField name="filterCallsByFullUrl(value)" type="MockCallHistoryLog[]">
+  Filters by the full URL including query string and hash. Accepts a string or `RegExp`.
+</ResponseField>
+<ResponseField name="clear()" type="void">
+  Clears all recorded logs. Called automatically by `mockAgent.close()`.
+</ResponseField>
+
+### `MockCallHistoryLog` properties
+
+Each log entry exposes the following properties:
+
+<ResponseField name="method" type="string">HTTP method of the request.</ResponseField>
+<ResponseField name="origin" type="string">Protocol and host, e.g. `'http://example.com'`.</ResponseField>
+<ResponseField name="path" type="string">Path portion of the URL, always starting with `/`.</ResponseField>
+<ResponseField name="fullUrl" type="string">Complete URL including protocol, host, path, query, and hash.</ResponseField>
+<ResponseField name="searchParams" type="Record<string, string>">Parsed query parameters as a plain object.</ResponseField>
+<ResponseField name="headers" type="object | undefined">Request headers.</ResponseField>
+<ResponseField name="body" type="any">Request body.</ResponseField>
+<ResponseField name="protocol" type="string">Protocol string, e.g. `'http:'`.</ResponseField>
+<ResponseField name="host" type="string">Host and port, e.g. `'example.com:3000'`.</ResponseField>
+<ResponseField name="port" type="string">Port number as a string, or an empty string if absent.</ResponseField>
+<ResponseField name="hash" type="string">URL hash including `#`, or an empty string if absent.</ResponseField>
+
+### Clearing call history
+
+```javascript title="Clearing all recorded calls"
+mockAgent.clearCallHistory()
+// equivalent to:
+mockAgent.getCallHistory()?.clear()
+```
+
+## Errors
+
+### `MockNotMatchedError`
+
+Thrown when `disableNetConnect()` is active and a request does not match any registered interceptor.
+
+```javascript title="Importing MockNotMatchedError"
+import { mockErrors } from 'undici'
+
+const { MockNotMatchedError } = mockErrors
+// error.code === 'UND_MOCK_ERR_MOCK_NOT_MATCHED'
+```
+
+## Cleanup
+
+Call `mockAgent.close()` after tests complete. This clears call history and closes all underlying mock pools and clients.
+
+```javascript title="Closing MockAgent after tests"
+await mockAgent.close()
+```
+
+## Complete example
+
+The following example uses `node:test` to verify a JSON API endpoint end-to-end with no real network traffic:
+
+```javascript title="Full test with MockAgent and node:test"
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { MockAgent, setGlobalDispatcher, getGlobalDispatcher, request } from 'undici'
+
+test('GET /users returns a list of users', async (t) => {
+  const original = getGlobalDispatcher()
+  const mockAgent = new MockAgent()
+  mockAgent.disableNetConnect()
+  setGlobalDispatcher(mockAgent)
+
+  t.after(async () => {
+    await mockAgent.close()
+    setGlobalDispatcher(original)
+  })
+
+  const mockPool = mockAgent.get('https://api.example.com')
+
+  mockPool
+    .intercept({ path: '/users', method: 'GET' })
+    .reply(200, [{ id: 1, name: 'Alice' }], {
+      headers: { 'content-type': 'application/json' }
+    })
+
+  const { statusCode, body } = await request('https://api.example.com/users')
+
+  assert.equal(statusCode, 200)
+  const data = await body.json()
+  assert.equal(data[0].name, 'Alice')
+
+  // Verify every registered interceptor was consumed
+  mockAgent.assertNoPendingInterceptors()
+})
+```
+
+<Tip>
+  Restore the original global dispatcher in a cleanup hook (`t.after` or `afterEach`) so mocks do not leak between tests.
+</Tip>

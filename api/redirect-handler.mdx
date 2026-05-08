@@ -1,0 +1,288 @@
+---
+title: "RedirectHandler and DecoratorHandler in undici"
+description: "Reference for undici's RedirectHandler and DecoratorHandler — 3xx redirect following, handler middleware, and the DecoratorHandler base class explained."
+---
+
+`RedirectHandler` and `DecoratorHandler` are two low-level handler classes that underpin undici's redirect infrastructure and the interceptor system. `RedirectHandler` intercepts 3xx responses and re-dispatches the request to the new `Location`, while `DecoratorHandler` provides a pass-through base class for building handler middleware without losing any lifecycle events.
+
+## `RedirectHandler`
+
+`RedirectHandler` implements all dispatch handler methods. When it receives a 3xx response with a `Location` header, it silently discards the redirect body, updates the request options to target the new URL, and calls `dispatch` again — repeating until the response is not a redirect or the redirect limit is reached.
+
+Under normal usage you won't construct `RedirectHandler` directly. The `interceptors.redirect` interceptor creates one automatically for every request. Direct instantiation is useful when you need to embed redirect-following logic within a custom handler pipeline without adding a dispatcher-level interceptor.
+
+### Constructor
+
+```ts
+new RedirectHandler(dispatch, maxRedirections, opts, handler)
+```
+
+<ParamField body="dispatch" type="function" required>
+  The dispatch function to invoke for each redirect hop. This is typically `client.dispatch.bind(client)` or a wrapped version that goes through your existing interceptor stack.
+</ParamField>
+
+<ParamField body="maxRedirections" type="number" required>
+  Maximum number of redirects to follow. Must be a non-negative integer. When the history length reaches this value, the interceptor stops redirecting: if `opts.throwOnMaxRedirect` is `true`, an error is thrown; otherwise the final 3xx response is forwarded to the handler.
+</ParamField>
+
+<ParamField body="opts" type="Dispatcher.DispatchOptions" required>
+  Standard dispatch options for the initial request. `RedirectHandler` mutates a copy of this object on each hop to update `path`, `origin`, `method`, and `headers`.
+</ParamField>
+
+<ParamField body="handler" type="Dispatcher.DispatchHandler" required>
+  The downstream handler that receives the final (non-redirect) response events.
+</ParamField>
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `location` | `string \| null` | The `Location` header value of the most recent 3xx response, or `null` when not redirecting |
+| `opts` | `object` | Current request options, updated on each redirect hop |
+| `maxRedirections` | `number` | The configured maximum redirect count |
+| `handler` | `object` | The wrapped downstream handler |
+| `history` | `URL[]` | Array of URLs visited during the redirect chain |
+
+### Redirect method and body rules
+
+The handler strictly follows RFC 7231 and the Fetch specification:
+
+| Status | Original method | New method | Body |
+|--------|----------------|-----------|------|
+| 301, 302 | `POST` | `GET` | Dropped |
+| 301, 302 | Any other | Unchanged | Preserved |
+| 303 | Any (except `HEAD`) | `GET` | Dropped |
+| 307, 308 | Any | Unchanged | Preserved |
+| 300 | Any | Unchanged | Discarded (ignored) |
+
+### Redirect loop detection
+
+`RedirectHandler` keeps a `history` array of visited URLs. Before following each redirect it checks whether the new `Location` is already in the history. If so, it throws an `InvalidArgumentError` with a message indicating a redirect loop was detected.
+
+<Warning>
+  `Client` and `Pool` only dispatch to their configured origin. Cross-origin redirects (e.g. `http://a.com → http://b.com`) will cause a loop: the client attempts to re-dispatch to the foreign origin, fails, and the redirect is attempted again. Use `Agent` for cross-origin redirect support.
+</Warning>
+
+### Header stripping on redirect
+
+The handler automatically removes sensitive headers in specific scenarios:
+
+- **`host`** — always removed and replaced with the redirect target's host.
+- **`content-*`** headers — removed on `303` redirects (because the method changes to `GET`).
+- **`authorization`**, **`cookie`**, **`proxy-authorization`** — removed when the redirect crosses an origin boundary (different scheme or host).
+
+### Handler methods
+
+`RedirectHandler` implements the full `Dispatcher.DispatchHandler` interface. Most methods delegate to the wrapped `handler`, but `onResponseStart`, `onResponseData`, and `onResponseEnd` contain the redirect interception logic.
+
+#### `onRequestStart(controller, context)`
+
+Forwards to the inner handler, augmenting `context` with a `history` property containing the redirect chain so far.
+
+#### `onResponseStart(controller, statusCode, headers, statusMessage)`
+
+The core of redirect logic. When `statusCode` is in `[300, 301, 302, 303, 307, 308]` and `headers.location` is present, this method updates `opts` for the next hop and records the current URL in `history`. If not redirecting, it forwards directly to the wrapped handler.
+
+#### `onResponseData(controller, chunk)`
+
+When a redirect is in progress, the body chunk is silently discarded. Otherwise the chunk is forwarded to the wrapped handler.
+
+#### `onResponseEnd(controller, trailers)`
+
+When a redirect is in progress, triggers the next dispatch instead of forwarding `onResponseEnd`. When not redirecting, forwards to the wrapped handler.
+
+#### `onResponseError(controller, error)`
+
+Always forwarded to the wrapped handler.
+
+#### `onRequestUpgrade(controller, statusCode, headers, socket)`
+
+Forwarded to the wrapped handler.
+
+### Comparing `RedirectHandler` to `interceptors.redirect`
+
+```
+interceptors.redirect({ maxRedirections: 10 })
+└─ createRedirectInterceptor
+   └─ on every dispatch: new RedirectHandler(dispatch, maxRedirections, opts, handler)
+```
+
+The interceptor is the idiomatic way to enable redirect following. Use `RedirectHandler` directly only when you need to compose it manually — for example, to share a `history` array across multiple dispatches or to embed redirect logic inside another handler class.
+
+### Examples
+
+<Tabs>
+  <Tab title="Via interceptor (recommended)">
+    ```js title="Redirect following via interceptors.redirect"
+    import { Agent, interceptors } from 'undici'
+
+    const agent = new Agent().compose(
+      interceptors.redirect({ maxRedirections: 10 })
+    )
+
+    const { statusCode, body } = await agent.request({
+      origin: 'https://example.com',
+      path: '/old-path',
+      method: 'GET'
+    })
+
+    console.log(statusCode) // 200 (after following any 3xx)
+    await body.dump()
+    ```
+  </Tab>
+  <Tab title="Manual RedirectHandler">
+    ```js title="Manual RedirectHandler construction"
+    import { Client, RedirectHandler } from 'undici'
+
+    const client = new Client('https://example.com')
+
+    const dispatchOpts = {
+      origin: 'https://example.com',
+      path: '/old-path',
+      method: 'GET',
+      headers: {}
+    }
+
+    const innerHandler = {
+      onRequestStart (_controller, context) {
+        // context.history contains the redirect chain
+        console.log('redirect history:', context.history)
+      },
+      onResponseStart (_controller, statusCode, headers) {
+        console.log('Final status:', statusCode)
+      },
+      onResponseData (_controller, _chunk) {},
+      onResponseEnd (_controller) {
+        console.log('Done')
+      },
+      onResponseError (_controller, err) {
+        console.error(err)
+      }
+    }
+
+    const redirectHandler = new RedirectHandler(
+      client.dispatch.bind(client),
+      10, // maxRedirections
+      dispatchOpts,
+      innerHandler
+    )
+
+    client.dispatch(dispatchOpts, redirectHandler)
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `DecoratorHandler`
+
+`DecoratorHandler` is the base class for handler middleware in undici. It wraps an inner handler and forwards every lifecycle method call to it unchanged, adding internal invariant assertions to catch incorrect handler usage (e.g. receiving data after completion, or completing twice).
+
+<Warning>
+  `DecoratorHandler` is marked `@deprecated` in the source. Prefer implementing the `Dispatcher.DispatchHandler` interface directly when writing new handler middleware. `DecoratorHandler` remains available for existing code and for handlers like `DumpHandler`, `DecompressHandler`, and `DNSDispatchHandler` that extend it internally.
+</Warning>
+
+### Constructor
+
+```ts
+new DecoratorHandler(handler)
+```
+
+<ParamField body="handler" type="object" required>
+  The handler object to delegate to. Must be a non-null object; throws `TypeError` otherwise.
+</ParamField>
+
+### Methods
+
+All methods are optional on the inner handler (called with optional chaining). `DecoratorHandler` adds `assert` guards to enforce the correct event ordering mandated by the dispatch protocol.
+
+| Method | Assertion | Forwards to |
+|--------|-----------|-------------|
+| `onRequestStart(controller, context)` | None | `handler.onRequestStart?.()` |
+| `onRequestUpgrade(controller, statusCode, headers, socket)` | Not completed, not errored | `handler.onRequestUpgrade?.()` |
+| `onResponseStart(controller, statusCode, headers, statusMessage)` | Not completed, not errored, not called before | `handler.onResponseStart?.()` |
+| `onResponseData(controller, chunk)` | Not completed, not errored | `handler.onResponseData?.()` |
+| `onResponseEnd(controller, trailers)` | Not completed, not errored | `handler.onResponseEnd?.()` |
+| `onResponseError(controller, err)` | None | `handler.onResponseError?.()` |
+| `onBodySent()` | — | No-op (deprecated) |
+
+### Subclassing `DecoratorHandler`
+
+To intercept a specific lifecycle event, override the corresponding method, perform your logic, and call `super.method()` to delegate to the wrapped handler.
+
+```js title="Custom handler that measures response time"
+import { DecoratorHandler, Client } from 'undici'
+
+class TimingHandler extends DecoratorHandler {
+  #startTime = null
+
+  onRequestStart (controller, context) {
+    this.#startTime = performance.now()
+    super.onRequestStart(controller, context)
+  }
+
+  onResponseEnd (controller, trailers) {
+    const elapsed = performance.now() - this.#startTime
+    console.log(`Request completed in ${elapsed.toFixed(2)}ms`)
+    super.onResponseEnd(controller, trailers)
+  }
+}
+
+const client = new Client('https://api.example.com')
+const chunks = []
+
+client.dispatch(
+  { origin: 'https://api.example.com', path: '/data', method: 'GET' },
+  new TimingHandler({
+    onRequestStart () {},
+    onResponseStart (_controller, statusCode) {
+      console.log('Status:', statusCode)
+    },
+    onResponseData (_controller, chunk) {
+      chunks.push(chunk)
+    },
+    onResponseEnd () {
+      console.log('Body length:', Buffer.concat(chunks).length)
+    },
+    onResponseError (_controller, err) {
+      console.error(err)
+    }
+  })
+)
+```
+
+### Using `DecoratorHandler` alongside `RedirectHandler`
+
+`RedirectHandler` does not extend `DecoratorHandler` — it implements the handler interface directly. However, you can combine both: wrap a `DecoratorHandler` subclass with a `RedirectHandler` to get redirect-following plus custom interception at the same time.
+
+```js title="RedirectHandler wrapping a DecoratorHandler subclass"
+import { Client, RedirectHandler, DecoratorHandler } from 'undici'
+
+class LoggingHandler extends DecoratorHandler {
+  onResponseStart (controller, statusCode, headers, statusMessage) {
+    console.log(`[${statusCode}] ${statusMessage}`)
+    super.onResponseStart(controller, statusCode, headers, statusMessage)
+  }
+}
+
+const client = new Client('https://example.com')
+const dispatchOpts = { origin: 'https://example.com', path: '/', method: 'GET', headers: {} }
+
+const innerHandler = new LoggingHandler({
+  onRequestStart () {},
+  onResponseStart () {},
+  onResponseData () {},
+  onResponseEnd () { console.log('done') },
+  onResponseError (_c, err) { console.error(err) }
+})
+
+// Wrap the logging handler in redirect handling
+const redirectHandler = new RedirectHandler(
+  client.dispatch.bind(client),
+  5,
+  dispatchOpts,
+  innerHandler
+)
+
+client.dispatch(dispatchOpts, redirectHandler)
+```

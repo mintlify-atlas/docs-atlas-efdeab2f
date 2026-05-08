@@ -1,0 +1,266 @@
+---
+title: "undici module vs. Node.js built-in fetch"
+description: "Compare installing undici from npm against using Node.js's built-in fetch. Covers performance, features, FormData consistency, and version checking."
+keywords: ["undici", "fetch", "built-in fetch", "node.js", "comparison", "proxyagent", "mockagent"]
+---
+
+Node.js has shipped a built-in `fetch()` implementation powered by undici since Node.js v18. Both options share the same underlying HTTP engine, but they expose different capabilities. This guide explains the differences, shows the performance data, and helps you decide which to use for your project.
+
+## Background: they share the same engine
+
+The `fetch()`, `Request`, `Response`, `Headers`, and `FormData` globals in Node.js v18+ come from a version of undici that is bundled directly into the Node.js binary. Installing undici from npm gives you the same library — but potentially a newer release — plus all of its additional APIs that are not exposed as globals.
+
+You can check which version of undici is currently bundled with your Node.js runtime:
+
+```javascript Checking the bundled undici version
+console.log(process.versions.undici) // e.g., "7.5.0"
+```
+
+## Comparison
+
+| Feature | Built-in `fetch` | undici module |
+|---|---|---|
+| Standard Fetch API | Yes | Yes |
+| `request()` / `stream()` / `pipeline()` | No | Yes |
+| `ProxyAgent` / `Socks5ProxyAgent` | No | Yes |
+| `MockAgent` / `MockClient` / `MockPool` | No | Yes |
+| `EnvHttpProxyAgent` | No | Yes (`--use-env-proxy` in Node.js v22.21+) |
+| Custom interceptors | No | Yes |
+| Connection pool configuration | No | Yes |
+| HTTP/1.1 pipelining | No | Yes |
+| `WebSocket` / `EventSource` | Yes (Node.js v22+) | Yes |
+| Always uses latest undici | No | Yes |
+| Zero additional dependencies | Yes | No |
+| Runs in browsers / Deno / Bun | Yes | No |
+
+## Performance comparison
+
+The benchmark below was run with 50 TCP connections and a pipelining depth of 10 on Node.js 22.11.0. All three undici APIs outperform the built-in `http` module with keep-alive, and `undici.request()` reaches over 18,000 req/sec — more than 3x the throughput of axios or node-fetch:
+
+| Client | Requests/sec | vs. slowest |
+|---|---|---|
+| axios | 5,708 | baseline |
+| node-fetch | 5,945 | +4.15% |
+| **undici fetch** | **5,903** | **+3.43%** |
+| http (keepalive) | 9,193 | +61.05% |
+| undici pipeline | 13,364 | +134.13% |
+| undici stream | 18,245 | +219.63% |
+| **undici request** | **18,340** | **+221.29%** |
+| undici dispatch | 22,234 | +289.51% |
+
+<Note>
+  `undici.fetch()` and the built-in global `fetch` perform similarly. The speed advantage of the undici module comes from `request()`, `stream()`, and `pipeline()`, which bypass the Web Streams layer.
+</Note>
+
+## When to use the built-in globals
+
+You do not need to install undici when all of the following are true:
+
+- You only need the standard Fetch API (`fetch`, `Request`, `Response`, `Headers`, `FormData`).
+- You are running Node.js v18 or later.
+- You do not depend on features or bug fixes from a newer undici release than the one bundled with your Node.js version.
+- You want zero additional runtime dependencies.
+- You are writing isomorphic code that also runs in browsers, Deno, Bun, or Cloudflare Workers.
+
+```javascript Using the built-in fetch globally (Node.js v18+)
+// No import needed — fetch is a global
+const response = await fetch('https://api.example.com/data')
+const data = await response.json()
+```
+
+## When to install the undici module
+
+Install undici from npm when you need any of the following:
+
+<AccordionGroup>
+  <Accordion title="Higher-performance request APIs">
+    `request()`, `stream()`, and `pipeline()` provide lower-level access and significantly better throughput than `fetch()`. Use them for high-volume services or data-intensive workloads.
+
+    ```javascript Using request() for performance
+    import { request } from 'undici'
+
+    const { statusCode, headers, body } = await request('https://api.example.com/data')
+    const data = await body.json()
+    ```
+  </Accordion>
+
+  <Accordion title="Connection pooling and dispatcher configuration">
+    `Client`, `Pool`, `BalancedPool`, `Agent`, and their options let you control keep-alive behavior, pipelining depth, and concurrency per origin.
+
+    ```javascript Configuring a connection pool
+    import { Pool } from 'undici'
+
+    const pool = new Pool('https://api.example.com', { connections: 10 })
+    const { body } = await pool.request({ path: '/users', method: 'GET' })
+    const users = await body.json()
+    ```
+  </Accordion>
+
+  <Accordion title="Proxy support">
+    `ProxyAgent` and `EnvHttpProxyAgent` provide full programmatic proxy configuration. While Node.js v22.21.0+ supports `--use-env-proxy` for built-in fetch, undici's `ProxyAgent` gives you per-request dispatcher control.
+
+    ```javascript Routing through a proxy
+    import { ProxyAgent, fetch } from 'undici'
+
+    const proxyAgent = new ProxyAgent('https://my-proxy.example.com:8080')
+    const response = await fetch('https://api.example.com/data', {
+      dispatcher: proxyAgent
+    })
+    ```
+  </Accordion>
+
+  <Accordion title="Mocking and testing">
+    `MockAgent`, `MockClient`, and `MockPool` let you intercept and assert on HTTP traffic in tests without running a real server or patching globals.
+
+    ```javascript Mocking with MockAgent
+    import { MockAgent, setGlobalDispatcher, fetch } from 'undici'
+
+    const mockAgent = new MockAgent()
+    setGlobalDispatcher(mockAgent)
+
+    const pool = mockAgent.get('https://api.example.com')
+    pool.intercept({ path: '/users' }).reply(200, [{ id: 1, name: 'Alice' }])
+
+    const response = await fetch('https://api.example.com/users')
+    const users = await response.json()
+    console.log(users) // [{ id: 1, name: 'Alice' }]
+    ```
+  </Accordion>
+
+  <Accordion title="Custom interceptors and middleware">
+    Compose interceptors for caching, retry, DNS, redirect, and deduplication on any dispatcher without modifying request call sites.
+
+    ```javascript Composing interceptors
+    import { Agent, interceptors, cacheStores } from 'undici'
+
+    const agent = new Agent().compose(
+      interceptors.cache({
+        store: new cacheStores.MemoryCacheStore({ maxCount: 1000 })
+      }),
+      interceptors.retry({ maxRetries: 3 })
+    )
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Migration: from built-in fetch to undici
+
+If you are currently using the built-in global `fetch` and want to migrate to undici, here are your options in increasing order of performance:
+
+### Drop-in fetch replacement
+
+Import `fetch` from undici instead of using the global. The API is identical:
+
+```javascript Switching to undici fetch
+// Before: built-in global
+const response = await fetch('https://api.example.com/data')
+const data = await response.json()
+
+// After: undici module (identical call signature)
+import { fetch } from 'undici'
+
+const response = await fetch('https://api.example.com/data')
+const data = await response.json()
+```
+
+### Migrate to request() for better performance
+
+`request()` returns `statusCode`, `headers`, and `body` directly — no `Response` wrapper — which eliminates the Web Streams overhead:
+
+```javascript Migrating from fetch to request()
+// Before: built-in fetch
+const response = await fetch('https://api.example.com/data')
+const data = await response.json()
+
+// After: undici.request() — same result, better throughput
+import { request } from 'undici'
+
+const { statusCode, body } = await request('https://api.example.com/data')
+const data = await body.json()
+```
+
+### Replace the global dispatcher
+
+To use undici's `fetch` globally (replacing the built-in), call `install()`:
+
+```javascript Replacing global fetch with undici
+import { install } from 'undici'
+
+install()
+
+// Now the global fetch, Headers, Response, Request, FormData, WebSocket,
+// and EventSource all come from undici
+const response = await fetch('https://api.example.com/data')
+```
+
+## Keep fetch and FormData from the same implementation
+
+<Warning>
+  Do not mix `FormData` from one implementation with `fetch` from another. The multipart encoding may differ between undici versions, causing subtle bugs.
+</Warning>
+
+When uploading `FormData`, use a consistent pair. Pick one of these patterns:
+
+<Tabs>
+  <Tab title="Built-in globals">
+    ```javascript Using built-in FormData with built-in fetch
+    const body = new FormData()
+    body.set('name', 'Alice')
+    body.set('role', 'admin')
+
+    await fetch('https://api.example.com/users', {
+      method: 'POST',
+      body
+    })
+    ```
+  </Tab>
+  <Tab title="undici imports">
+    ```javascript Using undici FormData with undici fetch
+    import { fetch, FormData } from 'undici'
+
+    const body = new FormData()
+    body.set('name', 'Alice')
+    body.set('role', 'admin')
+
+    await fetch('https://api.example.com/users', {
+      method: 'POST',
+      body
+    })
+    ```
+  </Tab>
+  <Tab title="install() globals">
+    ```javascript Using install() to set all globals from undici
+    import { install } from 'undici'
+
+    install()
+
+    // All globals now come from undici — they match
+    const body = new FormData()
+    body.set('name', 'Alice')
+
+    await fetch('https://api.example.com/users', {
+      method: 'POST',
+      body
+    })
+    ```
+  </Tab>
+</Tabs>
+
+## Version compatibility table
+
+| Node.js version | Bundled undici | `fetch` status | Notes |
+|---|---|---|---|
+| v18.x | ~5.x | Experimental (early), then stable | Behind `--experimental-fetch` in early v18 |
+| v20.x | ~6.x | Stable | |
+| v22.x | ~6.x / ~7.x | Stable | `--use-env-proxy` in v22.21.0+ |
+| v24.x | ~7.x | Stable | `--use-env-proxy` enabled by default |
+
+Installing undici from npm does **not** replace the built-in globals automatically. Use `install()` if you want your installed version to replace `globalThis.fetch` and friends. Otherwise, import directly:
+
+```javascript Importing undici fetch explicitly
+import { fetch } from 'undici' // your installed version, not the built-in global
+```
+
+<Tip>
+  Run `console.log(process.versions.undici)` at any time to see the exact undici version bundled with your Node.js runtime. If you need a newer version, install undici from npm.
+</Tip>

@@ -1,0 +1,558 @@
+---
+title: "Built-in Interceptors for undici Dispatchers"
+description: "Reference for all built-in undici interceptors: cache, retry, redirect, DNS, dump, decompress, deduplicate, and responseError — with options and compose usage."
+---
+
+Interceptors are middleware functions that wrap a dispatcher's `dispatch` method to add cross-cutting behaviour — caching, retrying, redirecting, decompressing, and more. undici ships with eight built-in interceptors accessible from `undici.interceptors`, and any number of interceptors can be layered together using the `.compose()` method available on every dispatcher.
+
+## How `.compose()` works
+
+`dispatcher.compose()` accepts one or more interceptor functions and returns a new dispatcher that applies them in order. Each interceptor receives the `dispatch` function of the one below it in the stack, so the first argument to `.compose()` runs first (outermost), and the last runs closest to the actual network call.
+
+```js title="Composing multiple interceptors"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.retry({ maxRetries: 3 }),
+  interceptors.cache({ store: new MemoryCacheStore() }),
+  interceptors.decompress()
+)
+```
+
+You can also pass an array:
+
+```js title="Array form"
+dispatcher.compose([interceptors.retry(), interceptors.redirect()])
+```
+
+---
+
+## `interceptors.cache(options)`
+
+The cache interceptor stores HTTP responses and serves them from the cache on subsequent matching requests, fully honouring RFC 9111 semantics (`Cache-Control`, `ETag`, `Last-Modified`, `Vary`, `stale-while-revalidate`, `stale-if-error`).
+
+<Note>
+  Only safe HTTP methods can be cached. Unsafe methods (`PUT`, `POST`, `PATCH`, `DELETE`) automatically invalidate cached entries for the same origin.
+</Note>
+
+```js title="Basic cache interceptor"
+import { Agent, interceptors, cacheStores } from 'undici'
+
+const { MemoryCacheStore } = cacheStores
+
+const agent = new Agent().compose(
+  interceptors.cache({ store: new MemoryCacheStore() })
+)
+
+const response = await agent.request({ origin: 'https://example.com', path: '/', method: 'GET' })
+```
+
+### Options
+
+<ParamField body="store" type="CacheStore" default="new MemoryCacheStore()">
+  The cache store to use. Must implement `get`, `createWriteStream`, and `delete`. Built-in options are `MemoryCacheStore` and `SqliteCacheStore`.
+</ParamField>
+
+<ParamField body="methods" type="string[]" default="['GET']">
+  HTTP methods whose responses will be cached. Only safe methods are accepted (`GET`, `HEAD`, `OPTIONS`, `TRACE`).
+</ParamField>
+
+<ParamField body="cacheByDefault" type="number" default="undefined">
+  When set to a number (TTL in seconds), responses that do not carry explicit `Cache-Control` directives are cached for that duration. Implements the RFC 9111 heuristic caching allowance.
+</ParamField>
+
+<ParamField body="type" type="'shared' | 'private'" default="'shared'">
+  Whether the cache behaves as a shared cache (e.g. a proxy) or a private cache (e.g. a browser). Affects how `Cache-Control: private` responses are handled.
+</ParamField>
+
+<ParamField body="origins" type="(string | RegExp)[]" default="undefined">
+  Allowlist of origins to cache. Requests to origins not in the list bypass the cache entirely. Strings are matched case-insensitively; `RegExp` instances are tested against the lowercase origin.
+</ParamField>
+
+### HTTP caching semantics
+
+The cache interceptor respects the following directives automatically:
+
+| Directive | Behaviour |
+|-----------|-----------|
+| `Cache-Control: no-store` | Bypasses the cache completely for this request |
+| `Cache-Control: no-cache` | Forces revalidation before serving a cached response |
+| `Cache-Control: max-age` | Treats response as fresh for the given number of seconds |
+| `Cache-Control: stale-while-revalidate` | Serves the stale response immediately while revalidating in the background |
+| `Cache-Control: stale-if-error` | Serves a stale response when the upstream returns an error |
+| `ETag` / `If-None-Match` | Used in conditional `GET` revalidation requests |
+| `Last-Modified` / `If-Modified-Since` | Used in conditional `GET` revalidation requests |
+| `Vary` | Cached entries are keyed per request header combination |
+
+### `MemoryCacheStore`
+
+An in-process, in-memory cache. Best for single-process applications or testing. Exported from `undici.cacheStores`.
+
+<ParamField body="maxSize" type="number" default="104857600">
+  Maximum total size in bytes of all stored responses combined (default 100 MB).
+</ParamField>
+
+<ParamField body="maxCount" type="number" default="1024">
+  Maximum number of cached responses. Once reached, new entries are not stored.
+</ParamField>
+
+<ParamField body="maxEntrySize" type="number" default="5242880">
+  Maximum size in bytes for a single response body (default 5 MB). Responses larger than this are not cached.
+</ParamField>
+
+### `SqliteCacheStore`
+
+A persistent cache backed by Node.js' built-in `node:sqlite` module. Survives process restarts and is safe to share across forked workers on the same machine.
+
+<Warning>
+  `SqliteCacheStore` requires the `node:sqlite` module, which is behind the `--experimental-sqlite` flag in older Node.js versions. Ensure your runtime supports it before use.
+</Warning>
+
+<ParamField body="location" type="string" default="':memory:'">
+  File path for the SQLite database. Defaults to an in-memory database.
+</ParamField>
+
+<ParamField body="maxCount" type="number" default="Infinity">
+  Maximum number of entries to persist. When the limit is reached, older entries are evicted.
+</ParamField>
+
+<ParamField body="maxEntrySize" type="number" default="Infinity">
+  Maximum size in bytes for a single response body. Responses larger than this value will not be stored.
+</ParamField>
+
+### Examples
+
+<Tabs>
+  <Tab title="MemoryCacheStore">
+    ```js title="In-memory cache"
+    import { Agent, interceptors, cacheStores } from 'undici'
+
+    const { MemoryCacheStore } = cacheStores
+
+    const store = new MemoryCacheStore({
+      maxSize: 50 * 1024 * 1024,  // 50 MB total
+      maxCount: 512,
+      maxEntrySize: 2 * 1024 * 1024 // 2 MB per entry
+    })
+
+    const agent = new Agent().compose(
+      interceptors.cache({ store, methods: ['GET', 'HEAD'] })
+    )
+
+    // First call hits the network
+    await agent.request({ origin: 'https://api.example.com', path: '/data', method: 'GET' })
+
+    // Second call is served from cache if still fresh
+    await agent.request({ origin: 'https://api.example.com', path: '/data', method: 'GET' })
+    ```
+  </Tab>
+  <Tab title="SqliteCacheStore">
+    ```js title="Persistent SQLite cache"
+    import { Agent, interceptors, cacheStores } from 'undici'
+
+    const { SqliteCacheStore } = cacheStores
+
+    const store = new SqliteCacheStore({
+      location: './http-cache.db',
+      maxCount: 10_000,
+      maxEntrySize: 10 * 1024 * 1024 // 10 MB per entry
+    })
+
+    const agent = new Agent().compose(
+      interceptors.cache({
+        store,
+        cacheByDefault: 300 // cache responses without Cache-Control for 5 minutes
+      })
+    )
+
+    const { body } = await agent.request({
+      origin: 'https://api.example.com',
+      path: '/items',
+      method: 'GET'
+    })
+
+    for await (const chunk of body) {
+      // consume body
+    }
+
+    store.close() // flush and close the SQLite connection when done
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `interceptors.retry(options)`
+
+The retry interceptor wraps every request in a `RetryHandler`, automatically re-dispatching failed requests with exponential backoff. It is transport-layer aware: it uses `Range` headers and `ETag` checks to resume partially received response bodies without re-downloading already-received bytes.
+
+<Note>
+  Requests with stateful bodies (streams, `AsyncIterable`) are not retried because the body cannot be replayed once partially consumed.
+</Note>
+
+### Options
+
+<ParamField body="maxRetries" type="number" default="5">
+  Maximum number of retry attempts before the error is propagated to the caller.
+</ParamField>
+
+<ParamField body="minTimeout" type="number" default="500">
+  Minimum wait time in milliseconds before the first retry.
+</ParamField>
+
+<ParamField body="maxTimeout" type="number" default="30000">
+  Upper bound in milliseconds for the computed retry delay. Exponential growth is capped at this value.
+</ParamField>
+
+<ParamField body="timeoutFactor" type="number" default="2">
+  Multiplier applied to the previous delay to produce the next one (`minTimeout * timeoutFactor ^ attempt`).
+</ParamField>
+
+<ParamField body="retryAfter" type="boolean" default="true">
+  When `true`, respects the server-sent `Retry-After` response header. Both date strings and relative seconds are supported. The computed wait is still capped at `maxTimeout`.
+</ParamField>
+
+<ParamField body="statusCodes" type="number[]" default="[500, 502, 503, 504, 429]">
+  HTTP status codes that trigger a retry. Responses with status codes not in this list are forwarded as-is to the handler.
+</ParamField>
+
+<ParamField body="methods" type="string[]" default="['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE', 'TRACE']">
+  HTTP methods eligible for retry. Non-idempotent methods such as `POST` and `PATCH` are excluded by default.
+</ParamField>
+
+<ParamField body="errorCodes" type="string[]" default="['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'ENETDOWN', 'ENETUNREACH', 'EHOSTDOWN', 'EHOSTUNREACH', 'EPIPE', 'UND_ERR_SOCKET']">
+  Node.js error codes and undici error codes that cause a retry.
+</ParamField>
+
+<ParamField body="throwOnError" type="boolean" default="true">
+  When `true`, the final error is thrown after all retries are exhausted. Set to `false` to receive the error response body instead of an exception — useful when you need to inspect the error payload returned by the server.
+</ParamField>
+
+<ParamField body="retry" type="(err, context, callback) => void" default="undefined">
+  Custom retry decision function. When provided, overrides the default exponential backoff logic. Call `callback(null)` to schedule a retry, or `callback(err)` to abort and surface the error. See [RetryHandler](/api/retry-handler) for the full signature.
+</ParamField>
+
+### Exponential backoff behaviour
+
+The delay before attempt `n` is calculated as:
+
+```
+delay = min(minTimeout * timeoutFactor^(n-1), maxTimeout)
+```
+
+If the server returns a `Retry-After` header, that value takes precedence (still capped at `maxTimeout`).
+
+### Example
+
+```js title="Retry interceptor with custom options"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.retry({
+    maxRetries: 4,
+    minTimeout: 200,
+    maxTimeout: 10_000,
+    timeoutFactor: 2,
+    statusCodes: [429, 500, 502, 503, 504],
+    methods: ['GET', 'HEAD'],
+    retryAfter: true
+  })
+)
+
+const response = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/flaky-endpoint',
+  method: 'GET'
+})
+```
+
+---
+
+## `interceptors.redirect(options)`
+
+The redirect interceptor automatically follows HTTP 3xx responses by re-dispatching the request to the `Location` URL. It maintains a redirect history, enforces an upper bound on the number of hops, and handles method changes mandated by the spec (e.g. `POST → GET` on 301/302/303).
+
+<Warning>
+  `Client` and `Pool` dispatchers only handle same-origin redirects. For cross-origin redirects, use an `Agent` — otherwise the interceptor will detect the redirect loop and throw an `InvalidArgumentError`.
+</Warning>
+
+### Options
+
+<ParamField body="maxRedirections" type="number" default="undefined">
+  Maximum number of redirections to follow. When `null` or `0`, redirects are not followed and the 3xx response is forwarded to the handler. If `maxRedirections` is also set per-request in `dispatchOptions`, the per-request value takes precedence.
+</ParamField>
+
+<ParamField body="throwOnMaxRedirect" type="boolean" default="undefined">
+  When `true`, exceeding `maxRedirections` throws an error instead of forwarding the final 3xx response.
+</ParamField>
+
+### Redirect status code handling
+
+| Status | Method change | Body |
+|--------|--------------|------|
+| 301, 302 (POST only) | `POST → GET` | Body dropped |
+| 303 (non-HEAD) | Any → `GET` | Body dropped |
+| 307, 308 | No change | Body preserved |
+| 300 | No change | Body ignored |
+
+Sensitive headers (`authorization`, `cookie`, `proxy-authorization`) are automatically stripped when following cross-origin redirects.
+
+### Example
+
+```js title="Redirect interceptor"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.redirect({ maxRedirections: 10 })
+)
+
+// Automatically follows up to 10 redirects
+const { statusCode, body } = await agent.request({
+  origin: 'https://example.com',
+  path: '/old-path',
+  method: 'GET'
+})
+```
+
+---
+
+## `interceptors.dns(options)`
+
+The DNS interceptor resolves hostnames to IP addresses and caches the results for `maxTTL` milliseconds. On each dispatch it substitutes the resolved IP in the origin, preserving the original `Host` header for correct TLS SNI and virtual hosting. It also implements Happy Eyeballs-style dual-stack fallback: on a connection error it retries with the other IP family before surfacing the error.
+
+### Options
+
+<ParamField body="maxTTL" type="number" default="10000">
+  Maximum time in milliseconds to cache a resolved DNS record. Individual records may have shorter TTLs. Default is 10 seconds.
+</ParamField>
+
+<ParamField body="maxItems" type="number" default="Infinity">
+  Maximum number of hostnames to keep in the DNS cache simultaneously.
+</ParamField>
+
+<ParamField body="dualStack" type="boolean" default="true">
+  When `true`, both IPv4 and IPv6 records are resolved and the interceptor alternates between them. When `false`, only the family specified by `affinity` is used.
+</ParamField>
+
+<ParamField body="affinity" type="4 | 6" default="null (auto when dualStack), 4 (when dualStack disabled)">
+  Preferred IP family. When `dualStack` is enabled and `affinity` is set, the preferred family is always tried first.
+</ParamField>
+
+<ParamField body="lookup" type="function" default="node:dns.lookup">
+  Custom DNS resolution function with the signature `(origin: URL, options, callback)`. Use this to integrate a custom resolver or a mock in tests.
+</ParamField>
+
+<ParamField body="pick" type="function" default="undefined">
+  Custom IP selection function with the signature `(origin: URL, records, affinity)`. Allows implementing custom load-balancing strategies across multiple IPs.
+</ParamField>
+
+<ParamField body="storage" type="DNSStorage" default="internal DNSStorage">
+  Custom DNS record storage implementing `{ get, set, full, delete }`. Provide this to share a DNS cache across multiple interceptor instances.
+</ParamField>
+
+### Example
+
+```js title="DNS interceptor with short TTL"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.dns({
+    maxTTL: 5_000,     // cache records for 5 seconds
+    maxItems: 100,     // cache at most 100 hostnames
+    dualStack: true,   // try both IPv4 and IPv6
+    affinity: 4        // prefer IPv4
+  })
+)
+```
+
+---
+
+## `interceptors.dump(options)`
+
+The dump interceptor discards the response body up to `maxSize` bytes, then signals completion to the underlying connection. This releases the connection back to the pool without waiting for the caller to consume the body — useful when you only need headers (e.g. checking status codes) and want to keep connection reuse efficient.
+
+### Options
+
+<ParamField body="maxSize" type="number" default="1048576">
+  Maximum number of bytes to read and discard (default 1 MB). If the `Content-Length` header reports a body larger than `maxSize`, the interceptor aborts immediately with a `RequestAbortedError`.
+</ParamField>
+
+<Note>
+  `maxSize` can also be controlled per-request via `dispatchOptions.dumpMaxSize`, which takes precedence over the interceptor-level default.
+</Note>
+
+### Example
+
+```js title="Dump interceptor — headers-only pattern"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.dump({ maxSize: 512 * 1024 }) // discard up to 512 KB
+)
+
+const { statusCode, headers } = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/health',
+  method: 'GET'
+})
+
+console.log(statusCode, headers['x-version'])
+// body is automatically discarded — connection returns to pool
+```
+
+---
+
+## `interceptors.decompress(options)`
+
+The decompress interceptor transparently decompresses response bodies encoded with `gzip`, `x-gzip`, `deflate`, `compress`, `x-compress`, `br` (Brotli), or `zstd`. It removes the `content-encoding` and `content-length` headers from the forwarded response so downstream handlers see raw bytes.
+
+<Warning>
+  `DecompressInterceptor` is marked as experimental. Its API may change in future minor releases.
+</Warning>
+
+### Options
+
+<ParamField body="skipStatusCodes" type="number[]" default="[204, 304]">
+  Status codes for which decompression is skipped. `204 No Content` and `304 Not Modified` never carry a body, so decompression is irrelevant.
+</ParamField>
+
+<ParamField body="skipErrorResponses" type="boolean" default="true">
+  When `true`, responses with status `>= 400` are forwarded as-is without decompression.
+</ParamField>
+
+### Supported encodings
+
+| `Content-Encoding` value | Decompressor |
+|--------------------------|-------------|
+| `gzip`, `x-gzip` | `zlib.createGunzip()` |
+| `deflate`, `compress`, `x-compress` | `zlib.createInflate()` |
+| `br` | `zlib.createBrotliDecompress()` |
+| `zstd` | `zlib.createZstdDecompress()` |
+
+<Note>
+  For security, the maximum number of chained `Content-Encoding` values is capped at 5. Responses with more than 5 encodings are rejected with an error.
+</Note>
+
+### Example
+
+```js title="Decompress interceptor"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.decompress()
+)
+
+const { body, headers } = await agent.request({
+  origin: 'https://api.example.com',
+  path: '/compressed-data',
+  method: 'GET',
+  headers: { 'accept-encoding': 'gzip, br' }
+})
+
+// body is already decompressed
+for await (const chunk of body) {
+  process.stdout.write(chunk)
+}
+```
+
+---
+
+## `interceptors.deduplicate(options)`
+
+The deduplicate interceptor coalesces concurrent identical requests into a single outgoing request. Additional callers that arrive while the first request is in flight are attached as _waiting handlers_; when the response arrives, all waiters receive the same response — headers, body chunks, and trailers — without any additional network round-trips.
+
+<Note>
+  Only safe HTTP methods can be deduplicated. The default is `['GET']`.
+</Note>
+
+### Options
+
+<ParamField body="methods" type="string[]" default="['GET']">
+  HTTP methods eligible for deduplication. Must be safe methods (`GET`, `HEAD`, `OPTIONS`, `TRACE`).
+</ParamField>
+
+<ParamField body="skipHeaderNames" type="string[]" default="[]">
+  Header names that, if present in an incoming request, cause it to bypass deduplication entirely. Header name matching is case-insensitive.
+</ParamField>
+
+<ParamField body="excludeHeaderNames" type="string[]" default="[]">
+  Header names excluded from the deduplication key. Requests that differ only in these headers are still treated as duplicates. Useful for tracing headers like `x-request-id`.
+</ParamField>
+
+<ParamField body="maxBufferSize" type="number" default="5242880">
+  Maximum bytes buffered per waiting handler (default 5 MB). If a waiting handler is paused and this threshold is exceeded, it is aborted to prevent unbounded memory growth.
+</ParamField>
+
+### Example
+
+```js title="Deduplicate interceptor"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.deduplicate({
+    methods: ['GET', 'HEAD'],
+    excludeHeaderNames: ['x-request-id', 'x-correlation-id']
+  })
+)
+
+// Both calls are in flight at the same time — only one HTTP request is sent
+const [r1, r2] = await Promise.all([
+  agent.request({ origin: 'https://api.example.com', path: '/data', method: 'GET' }),
+  agent.request({ origin: 'https://api.example.com', path: '/data', method: 'GET' })
+])
+```
+
+---
+
+## `interceptors.responseError()`
+
+The `responseError` interceptor converts HTTP error responses (status 400 and above) into thrown `ResponseError` exceptions. This lets you use try/catch for error handling instead of checking `statusCode` on every response.
+
+```js title="responseError interceptor"
+import { Agent, interceptors } from 'undici'
+
+const agent = new Agent().compose(
+  interceptors.responseError()
+)
+
+try {
+  const { body } = await agent.request({
+    origin: 'https://api.example.com',
+    path: '/not-found',
+    method: 'GET'
+  })
+  await body.json()
+} catch (err) {
+  // err is a ResponseError for 4xx/5xx responses
+  console.error(err.status)   // e.g. 404
+  console.error(err.body)     // parsed body (JSON or text)
+  console.error(err.headers)  // response headers
+}
+```
+
+The interceptor reads the response body for `application/json` and `text/plain` content types and parses them into `err.body`. For all other content types, `err.body` is an empty string.
+
+---
+
+## Combining interceptors
+
+Interceptors compose cleanly. The order matters: the first interceptor in `.compose()` is the outermost wrapper and runs first on every request. A common production setup layers retry around cache around decompression:
+
+```js title="Production-ready interceptor stack"
+import { Agent, interceptors, cacheStores } from 'undici'
+
+const { MemoryCacheStore } = cacheStores
+
+const agent = new Agent().compose(
+  // Outermost: retry the entire pipeline on failure
+  interceptors.retry({ maxRetries: 3, statusCodes: [429, 502, 503, 504] }),
+  // DNS cache to avoid repeated lookups
+  interceptors.dns({ maxTTL: 30_000 }),
+  // HTTP-level caching
+  interceptors.cache({ store: new MemoryCacheStore(), methods: ['GET', 'HEAD'] }),
+  // Transparent decompression
+  interceptors.decompress(),
+  // Convert 4xx/5xx to thrown errors
+  interceptors.responseError()
+)
+```
